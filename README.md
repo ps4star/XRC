@@ -93,10 +93,6 @@ for any target.
   AVX.
 - **It assumes code is not generated or modified at run time** (no JIT, no self-modifying code). What it translates
   is what is on disk. ELF files with text relocations (`DT_TEXTREL`: non-PIC code linked as a PIE) are not supported.
-- **In a PE, `fs:` (the Windows TEB) is translated as a flat address:** `fs:[0]` becomes guest address 0, not the
-  thread's TEB. A runtime that dispatches SEH exceptions or uses implicit TLS from translated code needs that fixed
-  first (see [Executable formats](#executable-formats)).
-
 ## Building
 
 xrc needs the **Odin compiler** with a small fix to its x86 decoder, `core:rexcode`. Three i386 decoding cases are
@@ -218,10 +214,10 @@ address, a size and code/data/write flags, an entry point, and functions with an
 Notes on each format:
 
 - **PE.**
-  - `fs:` accesses (the Windows TEB) are translated as flat addresses: `fs:[0]`, the head of the SEH exception-handler
-    chain, becomes guest address 0, shared by all threads. That is harmless as long as nothing walks the chain, which
-    holds for a runtime without SEH exception dispatch, such as the FINAL FANTASY XIII one. It stays this way for now
-    so that game's translation does not change. Implicit TLS (`fs:[0x2c]`) is wrong the same way.
+  - `fs:` accesses address the current thread's TEB: `fs:[ea]` becomes `XRC_SEG_FS + ea`, so the runtime points
+    `XRC_SEG_FS` at each guest thread's TEB. That covers the SEH exception-handler chain at `fs:[0]`, which MSVC's
+    frames push and pop, and implicit TLS through the array at `fs:[0x2c]`. The runtime builds the TEB fields the
+    program reads.
   - Segment registers read as the WOW64 selectors.
 - **ELF.**
   - **PIE and shared-object placement.** A PIE or shared object, linked at address 0, is placed at `--base` (default
@@ -445,7 +441,7 @@ A runtime has to provide what the generated code calls. The minimal set, as the 
 | `xrc_preempt_n(c)`, `xrc_gil_waiters` | Cooperative scheduling of guest threads. The generated code checks `xrc_gil_waiters` at loop back-edges and calls. A single-threaded runtime keeps it 0. |
 | `xrc_bad_return(c, target)`, `xrc_ud(c, addr)` | A function returned somewhere its caller did not expect, or an undefined or privileged instruction ran. |
 | `xrc_int(c, n)` | `int n`, e.g. Linux's `int 0x80` system calls. The registers are in `c`, and `c->eip` is the next instruction. |
-| `xrc_set_seg(c, seg, sel)`, `xrc_seg_fs`, `xrc_seg_gs` | A segment register was loaded (`seg` 4 is fs, 5 is gs), and the per-thread base `fs:` / `gs:` accesses add. Not in PE translations. |
+| `xrc_set_seg(c, seg, sel)`, `xrc_seg_fs`, `xrc_seg_gs` | A segment register was loaded (`seg` 4 is fs, 5 is gs), and the per-thread base `fs:` / `gs:` accesses add: for a Windows program, `xrc_seg_fs` is the thread's TEB (a runtime may define `XRC_SEG_FS` / `XRC_SEG_GS` itself instead). |
 
 Some builds need more:
 

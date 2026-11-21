@@ -187,10 +187,9 @@ rx_decode_bytes :: proc(code: []u8, addr: u32) -> (Rx_Ins, bool) {
 	if r.opc == 0x0f && p + 1 < int(r.len) {r.opc2 = code[p + 1]; p += 1}
 	if p + 1 < len(code) {r.modrm = code[p + 1]}
 	rx_normalize(&r)
-	// an fs: / gs: prefix onto the memory operand (rexcode keeps it in info.segment only): gs:[...] is TLS in Linux code.
-	// Not in a PE, whose translations have always taken fs:[...] as flat (MSVC's SEH frames and TLS reads: changing
-	// that would change every translation of them).
-	if exe.format != .PE && (r.seg == x86.FS || r.seg == x86.GS) {
+	// an fs: / gs: prefix onto the memory operand (rexcode keeps it in info.segment only): fs:[...] is the TEB in Windows
+	// code (the SEH chain at fs:[0], the TLS array at fs:[0x2c]), gs:[...] TLS in Linux code
+	if r.seg == x86.FS || r.seg == x86.GS {
 		s := x86.mem_make(x86.NONE, x86.NONE, 1, 0, r.seg).segment
 		for k in 0 ..< int(r.inst.operand_count) {
 			if r.inst.ops[k].kind == .MEMORY && r.inst.ops[k].mem.segment == 0 {r.inst.ops[k].mem.segment = s}
@@ -320,9 +319,8 @@ rx_normalize :: proc(r: ^Rx_Ins) {
 	case o >= 0xa0 && o <= 0xa3: // mov acc <-> [moffs]
 		disp := i32(u32(r.inst.ops[0].immediate))
 		sz: u8 = (o & 1) == 0 ? 1 : (r.p66 ? 2 : 4)
-		// (its segment prefix kept, gs:[abs] for Linux TLS -- not in a PE, where the translations have always taken
-		// fs:[abs] as [abs]: changing that would change every translation of MSVC's SEH frames)
-		mem := x86.op_mem(x86.mem_make(x86.NONE, x86.NONE, 1, disp, exe.format == .PE ? x86.NONE : r.seg), sz)
+		// (an fs: / gs: prefix is put on it with the other memory operands', in rx_decode_at)
+		mem := x86.op_mem(x86.mem_make(x86.NONE, x86.NONE, 1, disp, x86.NONE), sz)
 		acc := rx_acc(r, (o & 1) == 0)
 		r.inst.mnemonic = .MOV
 		r.inst.operand_count = 2

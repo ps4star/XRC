@@ -161,11 +161,16 @@ extern XRC_THREAD XrcTls xrc_tls_v;
 #define FS32_SET(off, v) (M32(xrc_teb + (u32)(off)) = (u32)(v))
 #endif
 
-/* fs: / gs: in executables other than PE (ELF, Mach-O, raw): an address from the segment's base, which the runtime
- * keeps per guest thread (Linux i386 TLS is gs:, set up by set_thread_area). A runtime may define both itself. */
-#ifndef XRC_SEG_GS
-extern XRC_THREAD u32 xrc_seg_fs, xrc_seg_gs;
+/* fs: / gs:[ea] is XRC_SEG_FS / XRC_SEG_GS + ea: the segment's base, which the runtime keeps per guest thread. In a
+ * Windows program fs: is the thread's TEB (the SEH chain at fs:[0], the TLS array at fs:[0x2c]); in a Linux one gs:
+ * is TLS, set up by set_thread_area. A runtime may define either itself (the FINAL FANTASY XIII one: XRC_SEG_FS is
+ * xrc_teb). */
+#ifndef XRC_SEG_FS
+extern XRC_THREAD u32 xrc_seg_fs;
 #define XRC_SEG_FS xrc_seg_fs
+#endif
+#ifndef XRC_SEG_GS
+extern XRC_THREAD u32 xrc_seg_gs;
 #define XRC_SEG_GS xrc_seg_gs
 #endif
 /* int N (Linux's system call int 0x80, ...): the registers are in c (c->eip: the next instruction) and are

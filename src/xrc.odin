@@ -304,10 +304,9 @@ x_reg_write :: proc(r: x86.Register, v: string) -> string {
 
 x_addr :: proc(m: x86.Memory) -> (string, bool) {
 	seg := m.segment
-	// es / cs / ss / ds are flat. fs / gs: in a PE (the TEB) not translated; elsewhere (ELF, Mach-O, raw) an address
-	// from the segment's base, which the runtime keeps per thread (XRC_SEG_FS / XRC_SEG_GS: Linux's TLS is gs:)
+	// es / cs / ss / ds are flat. fs / gs: an address from the segment's base, which the runtime keeps per thread
+	// (XRC_SEG_FS / XRC_SEG_GS): a Windows thread's TEB is fs:, Linux's TLS is gs:
 	if seg == 5 || seg == 6 {
-		if exe.format == .PE {return "", false}
 		m2 := m
 		m2.segment = 0
 		inner, ok := x_addr(m2)
