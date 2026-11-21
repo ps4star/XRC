@@ -93,9 +93,9 @@ for any target.
   AVX.
 - **It assumes code is not generated or modified at run time** (no JIT, no self-modifying code). What it translates
   is what is on disk. ELF files with text relocations (`DT_TEXTREL`: non-PIC code linked as a PIE) are not supported.
-- **In a PE, `fs:` (the Windows TEB) is not translated in general.** A function that uses it needs an override,
-  except the `mov eax, fs:[abs]` form, which is translated as a flat `[abs]` (see
-  [Executable formats](#executable-formats)).
+- **In a PE, `fs:` (the Windows TEB) is translated as a flat address:** `fs:[0]` becomes guest address 0, not the
+  thread's TEB. A runtime that dispatches SEH exceptions or uses implicit TLS from translated code needs that fixed
+  first (see [Executable formats](#executable-formats)).
 
 ## Building
 
@@ -218,8 +218,10 @@ address, a size and code/data/write flags, an entry point, and functions with an
 Notes on each format:
 
 - **PE.**
-  - Only the `mov eax, fs:[abs]` form of `fs:` (the Windows TEB) is translated, and it becomes a flat `[abs]`. MSVC's
-    SEH frames use that form for the exception-handler chain at `fs:[0]`. Every other `fs:` access needs an override.
+  - `fs:` accesses (the Windows TEB) are translated as flat addresses: `fs:[0]`, the head of the SEH exception-handler
+    chain, becomes guest address 0, shared by all threads. That is harmless as long as nothing walks the chain, which
+    holds for a runtime without SEH exception dispatch, such as the FINAL FANTASY XIII one. It stays this way for now
+    so that game's translation does not change. Implicit TLS (`fs:[0x2c]`) is wrong the same way.
   - Segment registers read as the WOW64 selectors.
 - **ELF.**
   - **PIE and shared-object placement.** A PIE or shared object, linked at address 0, is placed at `--base` (default

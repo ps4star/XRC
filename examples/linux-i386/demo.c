@@ -59,6 +59,9 @@ static int tls_setup(void) {
 }
 __attribute__((noinline)) static int tls_get(void) { int v; __asm__ volatile("movl %%gs:4, %0" : "=r"(v)); return v; }
 __attribute__((noinline)) static void tls_set(int v) { __asm__ volatile("movl %0, %%gs:4" ::"r"(v)); }
+/* the ModRM forms (moffs is only for eax): through ecx, and with a base register */
+__attribute__((noinline)) static int tls_get_ecx(void) { int v; __asm__ volatile("movl %%gs:8, %0" : "=c"(v)); return v; }
+__attribute__((noinline)) static void tls_set_at(int off, int v) { __asm__ volatile("movl %1, %%gs:(%0)" ::"r"(off), "d"(v) : "memory"); }
 
 #ifdef WITH_LIB
 int lib_scale(int x, int k);
@@ -80,7 +83,11 @@ void demo_main(void) {
 	unsigned long long h = 1469598103934665603ull;
 	for (int i = 0; i < 100; i++) h = (h ^ (unsigned)i) * 1099511628211ull;
 	line("64-bit hash", (long long)(h >> 1));
-	if (tls_setup() == 0) { tls_set(1234); line("gs: TLS", tls_get() + tls_block[1]); }
+	if (tls_setup() == 0) {
+		tls_set(1234);
+		tls_set_at(8, 4321);
+		line("gs: TLS", tls_get() + tls_block[1] + tls_get_ecx() * 10000 + tls_block[2] * 100000000ll);
+	}
 #ifdef WITH_LIB
 	out("library: "); out(lib_name()); out("\n");
 	line("lib_scale", lib_scale(21, 2));

@@ -187,6 +187,15 @@ rx_decode_bytes :: proc(code: []u8, addr: u32) -> (Rx_Ins, bool) {
 	if r.opc == 0x0f && p + 1 < int(r.len) {r.opc2 = code[p + 1]; p += 1}
 	if p + 1 < len(code) {r.modrm = code[p + 1]}
 	rx_normalize(&r)
+	// an fs: / gs: prefix onto the memory operand (rexcode keeps it in info.segment only): gs:[...] is TLS in Linux code.
+	// Not in a PE, whose translations have always taken fs:[...] as flat (MSVC's SEH frames and TLS reads: changing
+	// that would change every translation of them).
+	if exe.format != .PE && (r.seg == x86.FS || r.seg == x86.GS) {
+		s := x86.mem_make(x86.NONE, x86.NONE, 1, 0, r.seg).segment
+		for k in 0 ..< int(r.inst.operand_count) {
+			if r.inst.ops[k].kind == .MEMORY && r.inst.ops[k].mem.segment == 0 {r.inst.ops[k].mem.segment = s}
+		}
+	}
 	return r, true
 }
 
