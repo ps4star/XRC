@@ -2404,6 +2404,8 @@ ir_translate :: proc(mod: ^Ir_Mod, xl: ^Xlat, a: u32, size: u32, copy := false) 
 				} else {
 					ir_tail(&ir, &i, t, "", i.addr)
 				}
+			} else if _, is_tbl := xl.tables[i.addr]; is_tbl && ops[0].kind != .MEMORY {
+				ir_fail(&ir, "pic-table") // (a GOT-relative switch: C only)
 			} else if _, is_tbl := xl.tables[i.addr]; is_tbl && ops[0].kind == .MEMORY && ir_feat(&ir, "table") {
 				// a switch: the table slot (its address) selects the case -- the table is in .text, which the retail
 				// exe has encrypted, so the walker's slots are the cases; a slot it did not see is read and left

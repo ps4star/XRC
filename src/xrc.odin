@@ -267,9 +267,10 @@ x_hexu :: proc(v: u32) -> string {
 // a C expression (u32) for the value of a register operand at its width
 
 x_reg_read :: proc(r: x86.Register) -> string {
-	// segment registers read as the fixed selectors of a 32-bit Windows process (WOW64): ES CS SS DS FS GS
+	// segment registers read as the fixed selectors of a 32-bit process: ES CS SS DS FS GS -- Windows (WOW64)'s for a
+	// PE, Linux's for the rest (gs the TLS entry glibc sets up)
 	if x86.reg_class(r) == x86.REG_SEG {
-		sel := [6]u32{0x2b, 0x23, 0x2b, 0x2b, 0x53, 0x2b}
+		sel := exe.format == .PE ? [6]u32{0x2b, 0x23, 0x2b, 0x2b, 0x53, 0x2b} : [6]u32{0x7b, 0x73, 0x7b, 0x7b, 0, 0x33}
 		if hw := int(x86.reg_hw(r)); hw < 6 {return x_hexu(u32(sel[hw]))}
 	}
 	h := x_home(r)
@@ -285,6 +286,10 @@ x_reg_read :: proc(r: x86.Register) -> string {
 // a C statement assigning `v` into a register operand
 
 x_reg_write :: proc(r: x86.Register, v: string) -> string {
+	// a segment register loaded (not in a PE): the runtime sets the segment's base from the selector (gs: Linux TLS)
+	if x86.reg_class(r) == x86.REG_SEG && exe.format != .PE && int(x86.reg_hw(r)) < 6 {
+		return fmt.tprintf("xrc_set_seg(c, %d, (%s) & 0xffffu);", int(x86.reg_hw(r)), v)
+	}
 	h := x_home(r)
 	switch x86.reg_class(r) {
 	case x86.REG_GPR32: return fmt.tprintf("%s = (%s);", h, v)
@@ -299,11 +304,15 @@ x_reg_write :: proc(r: x86.Register, v: string) -> string {
 
 x_addr :: proc(m: x86.Memory) -> (string, bool) {
 	seg := m.segment
-	if seg == 5 { // fs: handled by FS32 at the access site, only for dword
-		return "", false
-	}
-	if seg != 0 { // es/cs/ss/ds/gs overrides: flat in Win32 except fs/gs; treat es/cs/ss/ds as flat
-		if seg == 6 {return "", false} // gs: unsupported here
+	// es / cs / ss / ds are flat. fs / gs: in a PE (the TEB) not translated; elsewhere (ELF, Mach-O, raw) an address
+	// from the segment's base, which the runtime keeps per thread (XRC_SEG_FS / XRC_SEG_GS: Linux's TLS is gs:)
+	if seg == 5 || seg == 6 {
+		if exe.format == .PE {return "", false}
+		m2 := m
+		m2.segment = 0
+		inner, ok := x_addr(m2)
+		if !ok {return "", false}
+		return fmt.tprintf("%s + (%s)", seg == 5 ? "XRC_SEG_FS" : "XRC_SEG_GS", inner), true
 	}
 	parts := make([dynamic]string, context.temp_allocator)
 	if x86.mem_has_base(m) {append(&parts, x_home(x86.mem_base(m)))}
@@ -921,7 +930,10 @@ x_emit :: proc(xl: ^Xlat, ins: ^Rx_Ins) {
 	case .CDQ: pf(xl, "    r_edx = (u32)((s32)r_eax >> 31);")
 	case .CWDE: pf(xl, "    r_eax = (u32)(s32)(s16)(u16)r_eax;")
 	case .CBW: pf(xl, "    SET16(r_eax, (u32)(s16)(s8)(u8)r_eax);")
-	case .XCHG: x_xchg(xl, ops[:], ea, have_ea)
+	case .XCHG:
+		// (66 90, xchg ax, ax: a 2-byte nop in padding)
+		if b := exe_read(ins.addr, 2); ins.len == 2 && len(b) == 2 && b[0] == 0x66 && b[1] == 0x90 {pf(xl, "    /* nop */"); break}
+		x_xchg(xl, ops[:], ea, have_ea)
 	case .LEAVE: pf(xl, "    r_esp = r_ebp; r_ebp = M32(r_esp); r_esp += 4;")
 	case .NOP, .FNOP: // nothing
 	case .CALL: x_call(xl, ins, ops[:], ea, have_ea)
@@ -964,6 +976,11 @@ x_emit :: proc(xl: ^Xlat, ins: ^Rx_Ins) {
 		x_rep(xl, ins, "cmps", sz)
 	case .CLD: pf(xl, "    xrc_eflags_sys &= ~XRC_EFL_DF;")
 	case .STD: pf(xl, "    xrc_eflags_sys |= XRC_EFL_DF;")
+	case .INT:
+		// a software interrupt (int 0x80: a Linux system call; int 0x2e: an old Windows one): the runtime's, with the
+		// registers published and reloaded (eip: the instruction after it)
+		if ins.inst.operand_count < 1 || ins.inst.ops[0].kind != .IMMEDIATE {fail(xl, "int*"); return}
+		pf(xl, "    { XRC_SPILL c->eip = 0x%xu; xrc_int(c, 0x%xu); XRC_FILL }", ins.addr + ins.len, u32(ins.inst.ops[0].immediate) & 0xff)
 	case .INT3: pf(xl, "    /* int3 */")
 	case .CLC: pf(xl, "    cf = 0;"); xl.uses_f = true
 	case .CLI, .STI, .HLT: pf(xl, "    XRC_UD(0x%xu); /* privileged: #GP in user mode */", ins.addr)
@@ -1408,6 +1425,11 @@ x_inline_site :: proc(xl: ^Xlat, ins: ^Rx_Ins, target: u32, il: X_Inline, alt :=
 }
 
 x_call :: proc(xl: ^Xlat, ins: ^Rx_Ins, ops: []x86.Operand, ea: string, have_ea: bool) {
+	// `call $+5; pop reg` (PIC code reading its own address): only the push
+	if ops[0].kind == .RELATIVE && rx_rel_target(ins, 0) == ins.addr + ins.len {
+		pf(xl, "    r_esp -= 4; M32(r_esp) = 0x%xu; /* call $+5 */", ins.addr + ins.len)
+		return
+	}
 	t := ""
 	direct: u32 = 0
 	if ops[0].kind == .RELATIVE {
@@ -1532,6 +1554,21 @@ x_jmp :: proc(xl: ^Xlat, ins: ^Rx_Ins, ops: []x86.Operand, ea: string, have_ea: 
 		}
 		pf(xl, "    }")
 		pf(xl, "    { u32 _t = %s;", v)
+		x_tail(xl, ins, "_t")
+		pf(xl, "    }")
+		return
+	}
+	if _, is_tbl := xl.tables[ins.addr]; is_tbl && ops[0].kind == .REGISTER {
+		// a GOT-relative switch (PIC code): the computed target selects the case; any other leaves as a tail call
+		pf(xl, "    { u32 _t = %s;", v)
+		pf(xl, "    switch (_t) {")
+		seen := make(map[u32]bool, context.temp_allocator)
+		for st in rx_table_slots[ins.addr] {
+			if st[1] in seen || !(st[1] in xl.labels) {continue}
+			seen[st[1]] = true
+			pf(xl, "    case 0x%xu: goto L_%08x;", st[1], st[1])
+		}
+		pf(xl, "    }")
 		x_tail(xl, ins, "_t")
 		pf(xl, "    }")
 		return
@@ -1675,7 +1712,7 @@ x_translate :: proc(a: u32, size: u32, exclude: map[i32]bool = nil, nofl := fals
 	}
 	x_spin_plan(&xl, ins[:])
 	for &i, k in ins {
-		if i.inst.mnemonic == .JMP && i.inst.operand_count > 0 && i.inst.ops[0].kind == .MEMORY {
+		if i.inst.mnemonic == .JMP && rx_table_jmp(&i) {
 			if t, ok := rx_jump_table(ins[:], k, a, size); ok {
 				xl.tables[i.addr] = t
 				// (its byte table: the movzx just before the jmp)
@@ -1909,7 +1946,7 @@ cmd_xrc :: proc(args: []string) -> int {
 		last^ = now
 	}
 	if EXE_PATH == "" {fmt.eprintln("xrc: --exe FILE is required"); return 2}
-	if !load_exe(EXE_PATH) {fmt.eprintf("xrc: cannot read %s\n", EXE_PATH); return 2}
+	if !load_exe(EXE_PATH) {return 2}
 	if !load_tables() {return 2}
 	lap(x_timing, &t_last, "load exe + tables")
 	addrs := make([dynamic]u32)
@@ -2102,7 +2139,8 @@ x_discover_entries :: proc() -> [dynamic]u32 {
 			for &i in ins {
 				covered[i.addr] = true
 				if rx_is_branch_end(i.inst.mnemonic) {ends[i.addr + i.len] = true}
-				if i.inst.mnemonic == .CALL && i.inst.operand_count > 0 && i.inst.ops[0].kind == .RELATIVE {
+				// (not `call $+5`: PIC code's way of reading its own address, a push and no function)
+				if i.inst.mnemonic == .CALL && i.inst.operand_count > 0 && i.inst.ops[0].kind == .RELATIVE && rx_rel_target(&i, 0) != i.addr + i.len {
 					calls[rx_rel_target(&i, 0)] = true
 				}
 				for k in 0 ..< int(i.inst.operand_count) {
@@ -2332,8 +2370,8 @@ x_flush_page :: proc(dir: string, page: u32, sb: ^strings.Builder) -> bool {
 //                  version of the game
 x_write_image_facts :: proc(tb: ^strings.Builder) {
 	d := exe.data
-	pe := int(u32le(d, 0x3c))
-	fmt.sbprintf(tb, "\nconst unsigned xrc_entry = 0x%08xu;\n", u32le(d, pe + 24 + 28) + u32le(d, pe + 24 + 16))
+	fmt.sbprintf(tb, "\nconst unsigned xrc_entry = 0x%08xu;\n", exe.entry)
+	if exe.bias != 0 {fmt.sbprintf(tb, "const unsigned xrc_load_base = 0x%08xu; /* (a PIE / shared object: its link addresses + this) */\n", exe.bias)}
 	// the data sections' hash: every section but code, over the bytes the file has (the runtime hashes the same
 	// ranges of its loaded image, before anything writes there)
 	h: u64 = 0xcbf29ce484222325

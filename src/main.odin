@@ -1,11 +1,11 @@
 package xrc
 
-// xrc: a static recompiler from 32-bit x86 (a Windows PE) to C. See README.md for everything it does and every option.
+// xrc: a static recompiler from 32-bit x86 executables (PE, ELF, Mach-O, raw images) to C. See README.md for everything it does and every option.
 //
-//   xrc --exe FILE [--override NAME | --data DIR] (--all | --list FILE) [--out DIR] [--report FILE] [--table FILE]
+//   xrc --exe FILE [--raw ADDR | --base ADDR] [--override NAME | --data DIR] (--all | --list FILE) [--out DIR] [--report FILE] [--table FILE]
 //       [--matched FILE] [--llvm]
 //
-// main.odin reads the options that say where things are (--exe, --override, --data) and hands the rest to cmd_xrc
+// main.odin reads the options that say where things are (--exe, --raw, --override, --data) and hands the rest to cmd_xrc
 // (xrc.odin), which does the work.
 
 import "core:fmt"
@@ -16,14 +16,20 @@ import "core:strings"
 EXE_PATH := "" // --exe
 
 usage :: proc() {
-	fmt.eprintln(`usage: xrc --exe FILE [--override NAME | --data DIR] (--all | --list FILE) [--out DIR] [options]
+	fmt.eprintln(`usage: xrc --exe FILE [--raw ADDR | --base ADDR] [--override NAME | --data DIR] (--all | --list FILE) [--out DIR] [options]
 
-  --exe FILE        the 32-bit PE to translate (an unpacked exe: xrc reads its sections as they are on disk)
+  --exe FILE        the 32-bit x86 executable to translate: a PE (.exe, .dll), an ELF (Linux, BSD), a Mach-O
+                    (macOS, also the i386 slice of a fat file), or a flat image with --raw. xrc reads it as it is on
+                    disk (a packed or encrypted one must be unpacked first)
+  --raw ADDR        --exe is a flat image: all of it code and data, loaded at ADDR (hex), its entry point ADDR
+  --base ADDR       where a PIE or shared object (ELF, linked at 0) is placed: its addresses + ADDR (hex; default
+                    56555000, where Linux puts a 32-bit PIE). The runtime loads it there too
   --override NAME   the game's folder: overrides/NAME/ beside xrc, or in the current directory, or NAME itself if it
                     is a folder. It has the tables (data/), xrc.cfg, overrides.tsv and the hand-written .c / .h files,
                     which are copied to <out>/overrides/
-  --data DIR        the tables (function_map.csv, iat.json, ...) somewhere else (default: the game folder's data/)
-  --all             translate every function of the function map (and entry points found from calls)
+  --data DIR        the tables (function_map.csv, ...) somewhere else (default: the game folder's data/). The
+                    function map may be left out when the executable has symbols: they are the map then
+  --all             translate every function of the map (and entry points found from calls and references)
   --list FILE       translate only the functions listed (a hex address first on each line)
   --out DIR         write page_XXXX.c there (one per 64 KB page; unchanged pages are not rewritten).
                     Without it nothing is written but the report
@@ -65,6 +71,18 @@ main :: proc() {
 			need(args, i)
 			i += 1
 			data_dir = args[i]
+		case "--base":
+			need(args, i)
+			i += 1
+			v, ok := hex_u32(args[i])
+			if !ok {fmt.eprintf("xrc: --base needs a hex address, not %s\n", args[i]); os.exit(2)}
+			BASE, BASE_SET = v, true
+		case "--raw":
+			need(args, i)
+			i += 1
+			v, ok := hex_u32(args[i])
+			if !ok {fmt.eprintf("xrc: --raw needs a hex load address, not %s\n", args[i]); os.exit(2)}
+			RAW_BASE, RAW_SET = v, true
 		case "-h", "--help":
 			usage()
 			os.exit(0)
@@ -90,10 +108,6 @@ main :: proc() {
 		cfg, _ := filepath.join({OVERRIDE_DIR, "xrc.cfg"})
 		if !config_load(cfg) {os.exit(2)}
 		if data_dir == "" {data_dir, _ = filepath.join({OVERRIDE_DIR, "data"})}
-	}
-	if data_dir == "" {
-		fmt.eprintln("xrc: no tables: give --override NAME (its data/ folder) or --data DIR")
-		os.exit(2)
 	}
 	DATA_DIR = data_dir
 	os.exit(cmd_xrc(rest[:]))

@@ -161,6 +161,20 @@ extern XRC_THREAD XrcTls xrc_tls_v;
 #define FS32_SET(off, v) (M32(xrc_teb + (u32)(off)) = (u32)(v))
 #endif
 
+/* fs: / gs: in executables other than PE (ELF, Mach-O, raw): an address from the segment's base, which the runtime
+ * keeps per guest thread (Linux i386 TLS is gs:, set up by set_thread_area). A runtime may define both itself. */
+#ifndef XRC_SEG_GS
+extern XRC_THREAD u32 xrc_seg_fs, xrc_seg_gs;
+#define XRC_SEG_FS xrc_seg_fs
+#define XRC_SEG_GS xrc_seg_gs
+#endif
+/* int N (Linux's system call int 0x80, ...): the registers are in c (c->eip: the next instruction) and are
+ * reloaded after it */
+void xrc_int(XCtx *c, u32 n);
+/* a segment register loaded (mov gs, ax ...; seg: 0 es, 1 cs, 2 ss, 3 ds, 4 fs, 5 gs): the runtime looks the selector up
+ * (the descriptor set_thread_area made) and sets XRC_SEG_FS / XRC_SEG_GS */
+void xrc_set_seg(XCtx *c, u32 seg, u32 sel);
+
 /* ---- helpers ---- */
 #define PAR8(v) ((u8)(~((0x6996u >> (((v) ^ ((v) >> 4)) & 0xf)) & 1)) & 1) /* x86 PF: even number of set bits */
 XRC_INLINE u32 xbsf(u32 v) { u32 i = 0; while (!(v & 1u)) { v >>= 1; i++; } return i; } /* v != 0 */

@@ -311,7 +311,9 @@ rx_normalize :: proc(r: ^Rx_Ins) {
 	case o >= 0xa0 && o <= 0xa3: // mov acc <-> [moffs]
 		disp := i32(u32(r.inst.ops[0].immediate))
 		sz: u8 = (o & 1) == 0 ? 1 : (r.p66 ? 2 : 4)
-		mem := x86.op_mem(x86.mem_make(x86.NONE, x86.NONE, 1, disp, x86.NONE), sz)
+		// (its segment prefix kept, gs:[abs] for Linux TLS -- not in a PE, where the translations have always taken
+		// fs:[abs] as [abs]: changing that would change every translation of MSVC's SEH frames)
+		mem := x86.op_mem(x86.mem_make(x86.NONE, x86.NONE, 1, disp, exe.format == .PE ? x86.NONE : r.seg), sz)
 		acc := rx_acc(r, (o & 1) == 0)
 		r.inst.mnemonic = .MOV
 		r.inst.operand_count = 2
@@ -404,7 +406,7 @@ rx_function :: proc(a: u32, size: u32, alloc := context.allocator) -> (out: [dyn
 			if (rx_is_jcc(m) || m == .JMP) && i.inst.operand_count > 0 && i.inst.ops[0].kind == .RELATIVE {
 				append(&work, rx_rel_target(&i, 0))
 			}
-			if m == .JMP && i.inst.operand_count > 0 && i.inst.ops[0].kind == .MEMORY {
+			if m == .JMP && rx_table_jmp(&i) {
 				if t, ok := rx_jump_table(out[:], len(out) - 1, a, size); ok {
 					for x in t {append(&work, x)}
 				}
@@ -443,10 +445,21 @@ rx_table_slots: map[u32][dynamic][2]u32
 rx_byte_tables: map[u32]Rx_Byte_Table
 @(private = "file")
 rx_cur_slots: ^[dynamic][2]u32
+@(private = "file")
+rx_cur_bias: u32 // (a GOT-relative table: the GOT address, added to every entry)
 
+// a jmp that may be a switch: through memory, or (PIC code: the executable has a GOT) through a register
+rx_table_jmp :: proc(i: ^Rx_Ins) -> bool {
+	if i.inst.operand_count == 0 {return false}
+	return i.inst.ops[0].kind == .MEMORY || (i.inst.ops[0].kind == .REGISTER && exe.got != 0)
+}
+
+// PIC code (ELF, Mach-O) switches through a GOT-relative table instead:
+//     cmp idx, N-1 ; ja default ; mov r, [got + idx*4 + table@GOTOFF] ; add r, got ; jmp r
+// (got: the register that holds the GOT's address, ebx in most code). The same walk, with every entry + the GOT.
 rx_jump_table :: proc(ins: []Rx_Ins, k: int, a, size: u32) -> (out: [dynamic]u32, ok: bool) {
 	j := &ins[k]
-	if j.inst.operand_count == 0 || j.inst.ops[0].kind != .MEMORY {return}
+	if !rx_table_jmp(j) {return}
 	if rx_table_slots == nil {rx_table_slots = make(map[u32][dynamic][2]u32); rx_byte_tables = make(map[u32]Rx_Byte_Table)} // (the heap: callers use temp allocators)
 	slots := make([dynamic][2]u32)
 	rx_cur_slots = &slots
@@ -459,9 +472,37 @@ rx_jump_table :: proc(ins: []Rx_Ins, k: int, a, size: u32) -> (out: [dynamic]u32
 			delete(slots)
 		}
 	}
-	mm := j.inst.ops[0].mem
-	if !x86.mem_has_index(mm) || x86.mem_has_base(mm) || x86.mem_scale(mm) != 4 || mm.segment != 0 {return}
-	tbl := u32(mm.disp)
+	rx_cur_bias = 0
+	tbl: u32
+	if j.inst.ops[0].kind == .REGISTER {
+		// (right before the jmp: GCC's `mov r, [got + idx*4 + t]; add r, got`, or clang's `add got, [got + idx*4 + t]`
+		// with r = got)
+		if k < 1 {return}
+		ad := &ins[k - 1]
+		r := j.inst.ops[0].reg
+		if ad.addr + ad.len != j.addr || ad.inst.mnemonic != .ADD || ad.inst.operand_count != 2 || ad.inst.ops[0].kind != .REGISTER ||
+		   ad.inst.ops[0].reg != r {return}
+		m: x86.Memory
+		g: x86.Register
+		if ad.inst.ops[1].kind == .MEMORY {
+			m, g = ad.inst.ops[1].mem, r
+		} else if ad.inst.ops[1].kind == .REGISTER && k >= 2 {
+			mv := &ins[k - 2]
+			g = ad.inst.ops[1].reg
+			if mv.addr + mv.len != ad.addr || mv.inst.mnemonic != .MOV || mv.inst.operand_count != 2 || mv.inst.ops[0].kind != .REGISTER ||
+			   mv.inst.ops[0].reg != r || mv.inst.ops[1].kind != .MEMORY {return}
+			m = mv.inst.ops[1].mem
+		} else {
+			return
+		}
+		if !x86.mem_has_base(m) || x86.mem_base(m) != g || !x86.mem_has_index(m) || x86.mem_scale(m) != 4 || m.segment != 0 {return}
+		rx_cur_bias = exe.got
+		tbl = exe.got + u32(m.disp)
+	} else {
+		mm := j.inst.ops[0].mem
+		if !x86.mem_has_index(mm) || x86.mem_has_base(mm) || x86.mem_scale(mm) != 4 || mm.segment != 0 {return}
+		tbl = u32(mm.disp)
+	}
 	if tbl < exe.lo || tbl >= exe.hi {return}
 	// walk back over the contiguous instructions before the jmp
 	bound := -1
@@ -501,8 +542,10 @@ rx_jump_table :: proc(ins: []Rx_Ins, k: int, a, size: u32) -> (out: [dynamic]u32
 	out = make([dynamic]u32, context.temp_allocator)
 	entry :: proc(at: u32) -> u32 {
 		b := exe_read(at, 4)
-		if rx_cur_slots != nil {append(rx_cur_slots, [2]u32{at, u32(b[0]) | u32(b[1]) << 8 | u32(b[2]) << 16 | u32(b[3]) << 24})}
-		return u32(b[0]) | u32(b[1]) << 8 | u32(b[2]) << 16 | u32(b[3]) << 24
+		if len(b) < 4 {return 0}
+		t := (u32(b[0]) | u32(b[1]) << 8 | u32(b[2]) << 16 | u32(b[3]) << 24) + rx_cur_bias
+		if rx_cur_slots != nil {append(rx_cur_slots, [2]u32{at, t})}
+		return t
 	}
 	if bound > 0 {
 		for e in 0 ..< n {

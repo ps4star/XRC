@@ -1,13 +1,23 @@
 # xrc
 
-**xrc** is a static recompiler: it translates the machine code of a 32-bit x86 Windows program (a PE `.exe`) into C,
-ahead of time, one C function per x86 function. Compiled together with a runtime, the generated C runs the original
-program's logic natively on any CPU and OS a C compiler targets: x86-64, ARM64, Linux, Windows, macOS, Android.
+**xrc** is a static recompiler: it translates the machine code of a 32-bit x86 program into C, ahead of time, one C
+function per x86 function. Compiled together with a runtime, the generated C runs the original program's logic
+natively on any CPU and OS a C compiler targets: x86-64, ARM64, Linux, Windows, macOS, Android.
+
+It reads the common 32-bit x86 executable formats:
+
+| Format | Files |
+|---|---|
+| **PE** | Windows `.exe` and `.dll` |
+| **ELF** | Linux and BSD executables, PIEs and shared objects (`.so`), static or dynamically linked |
+| **Mach-O** | macOS i386 executables, dylibs and bundles, and the i386 slice of a fat (universal) file |
+| **Raw** | a flat image loaded at a given address (boot code, firmware, a dumped image) |
 
 It was written for, and is used by, a port of **FINAL FANTASY XIII** (2014 Steam release) to 64-bit PCs, Linux, macOS
 and Android. For that game it translates all 55,770 functions of the game's executable, and the result runs the whole
-game. The translator itself is not tied to the game: what is specific to one game lives in its folder under
-`overrides/`, and `overrides/Final Fantasy XIII/` is the example.
+game. The translator itself is not tied to the game: what is specific to one program lives in its folder under
+`overrides/`, and `overrides/Final Fantasy XIII/` is the example. `examples/linux-i386/` is a complete small one: a
+Linux program, translated and run on x86-64 or ARM64 with a 200-line runtime.
 
 xrc is written in [Odin](https://odin-lang.org/). It does not include any game: you supply the executable you own.
 
@@ -19,6 +29,8 @@ xrc is written in [Odin](https://odin-lang.org/). It does not include any game: 
 - [What it does not do](#what-it-does-not-do)
 - [Building](#building)
 - [Usage](#usage)
+- [Quick start: a Linux program](#quick-start-a-linux-program)
+- [Executable formats](#executable-formats)
 - [Command-line options](#command-line-options)
 - [Environment variables](#environment-variables)
 - [The game folder](#the-game-folder)
@@ -37,15 +49,19 @@ xrc is written in [Odin](https://odin-lang.org/). It does not include any game: 
 
 ## What it does
 
-Given an unpacked 32-bit PE and a map of its functions, xrc:
+Given a 32-bit x86 executable and a map of its functions (its own symbols, or a function map you supply), xrc:
 
-1. **Loads** the executable's sections and the game's tables: the function map, the import table, and optional
-   profiles.
+1. **Loads** the executable's sections or segments, its symbols and import stubs, and the program's tables: the
+   function map and optional profiles. A PIE or shared object is placed at a load address, with its relocations
+   applied.
 2. **Finds the functions the map is missing**: addresses that direct calls, `push offset f`, jump tables or data
    reach become functions too.
 3. **Translates each function to C**, `void xf_<addr>(XCtx *c)`:
    - Every integer, control-flow, string, x87, MMX and SSE/SSE2 instruction the binary uses is handled.
-   - Switch jump tables become C `switch` statements, so no byte of the original code is read at run time.
+   - Switch jump tables become C `switch` statements, so no byte of the original code is read at run time. Both
+     absolute tables (`jmp [idx*4 + table]`) and the GOT-relative ones of position-independent code are handled.
+   - Software interrupts (`int 0x80`, Linux's system calls) and `fs:` / `gs:` thread-local storage go to the
+     runtime.
 4. **Optimizes** what it writes, as far as it can prove safe:
    - Flags are computed only where something reads them, and compare-and-branch pairs are fused.
    - Calls between translated functions are direct.
@@ -63,16 +79,23 @@ for any target.
 ## What it does not do
 
 - **It is not a runtime.** The generated code needs one: guest memory, threads, the dispatcher, and the operating
-  system's API (Win32, Direct3D, ...) implemented on the host. This repository has the interface the output expects
-  (`include/xrc.h`, [below](#compiling-the-output-the-runtime)), not a runtime. The FINAL FANTASY XIII port has its own
-  runtime, which is not part of this repository.
-- **It does not unpack or decrypt.** DRM-wrapped executables (e.g. SteamStub) must be unpacked first. xrc reads the
-  sections as they are in the file.
+  system's API (Win32 and Direct3D, or libc and Linux system calls, ...) implemented on the host. This repository has
+  the interface the output expects (`include/xrc.h`, [below](#compiling-the-output-the-runtime)) and a minimal
+  example runtime for small Linux programs (`examples/linux-i386/`), not a full runtime. The FINAL FANTASY XIII port
+  has its own runtime, which is not part of this repository.
+- **It does not translate shared libraries along with a program.** A program's imports (libc, `kernel32.dll`, ...)
+  are the runtime's to provide, usually natively. A library can be translated on its own like any other executable.
+- **It does not unpack or decrypt.** DRM-wrapped executables (e.g. SteamStub) and packed ones (UPX) must be unpacked
+  first. xrc reads the sections as they are in the file.
 - **It is not a decompiler.** The output is machine-level C (registers as variables, memory as `M32(addr)`), meant to
   be compiled, not read.
-- **It handles 32-bit x86 only** (i386 through SSE2, the subset MSVC-era programs use). No 64-bit code, no AVX.
+- **It handles 32-bit x86 only** (i386 through SSE2, the subset MSVC- and GCC-era programs use). No 64-bit code, no
+  AVX.
 - **It assumes code is not generated or modified at run time** (no JIT, no self-modifying code). What it translates
-  is what is on disk.
+  is what is on disk. ELF files with text relocations (`DT_TEXTREL`: non-PIC code linked as a PIE) are not supported.
+- **In a PE, `fs:` (the Windows TEB) is not translated in general.** A function that uses it needs an override,
+  except the `mov eax, fs:[abs]` form, which is translated as a flat `[abs]` (see
+  [Executable formats](#executable-formats)).
 
 ## Building
 
@@ -125,6 +148,7 @@ Only pages whose content changed are rewritten, so a build system recompiles onl
 A run prints a summary. For FINAL FANTASY XIII:
 
 ```
+xrc: PE i386 executable, 5 sections, entry 01013b3c; 52856 functions (function_map.csv)
 xrc: 2914 entry points found from direct calls and address references (not in the function map)
 xrc: 49082 of 55770 functions keep ebx esi edi ebp (direct calls to them reload only eax ecx edx esp)
 xrc: 26028 functions of up to 24 instructions inlined at their direct calls (11384 leaves, 14644 that call)
@@ -135,20 +159,99 @@ xrc: 6 override files from overrides/Final Fantasy XIII in gen/src/overrides, 6 
 xrc: 55770 functions  55717 ok (99.9%)  15 hand-written  38 unreachable  0 need an override (covered 100.00%)
 ```
 
+An executable that has symbols (most Linux and macOS programs, unless stripped) needs no game folder at all. Its
+symbols are the function map:
+
+```sh
+xrc --exe ./myprogram --all --out gen --table gen/xrc_table.c --report coverage.tsv
+```
+
 **For a new program:**
-1. Make a game folder (see [The game folder](#the-game-folder)) with at least `data/function_map.csv` and
-   `data/iat.json`.
+1. If it has no symbols (most Windows programs, stripped Linux ones), make a game folder (see
+   [The game folder](#the-game-folder)) with at least `data/function_map.csv`, a Ghidra export of its functions.
 2. Run xrc without `--out` first. It writes only the report, which lists every function it could not translate and
    why.
-3. Each of those needs a hand-written override, or a fix to xrc.
+3. Each of those needs a hand-written override, or a fix to xrc. The
+   [tutorial](#tutorial-overrides-for-your-own-executable) shows how.
+
+## Quick start: a Linux program
+
+`examples/linux-i386/` takes a small C program from source to a translation running on a 64-bit machine:
+
+```sh
+cd examples/linux-i386
+sh run.sh
+```
+
+`run.sh` does the following:
+1. It builds `demo.c` as a 32-bit Linux program four ways: static, PIE, dynamically linked with a shared library
+   (`lib.c`), and a PIE with that library.
+2. It translates each build with xrc.
+3. It compiles each translation for the machine you are on, with the example runtime.
+4. It runs each one, and compares the output with the program run natively.
+
+The demo covers a switch (a jump table), recursion, function pointers, x87 floating point, struct copies, 64-bit
+arithmetic, `gs:` thread-local storage, Linux system calls, and calls into a shared library through the PLT. It
+needs clang with the i386 target and GNU ld or lld. On an x86-64 Linux that can run 32-bit programs, every run is
+compared with the native one. On ARM64 the translation runs the same; there is just nothing native to compare with.
+
+The example runtime, `examples/linux-i386/runtime/runtime.c`, is about 200 lines. It shows what any runtime does:
+- it loads the segments into guest memory and applies a PIE's relocations;
+- it dispatches by guest address;
+- it binds imports to native C functions;
+- it implements system calls and `gs:`.
+
+## Executable formats
+
+xrc detects the format from the file. Every format comes down to the same model: sections (or segments) with an
+address, a size and code/data/write flags, an entry point, and functions with an address and a size.
+
+| | PE | ELF | Mach-O | Raw (`--raw ADDR`) |
+|---|---|---|---|---|
+| Sections | section table | `PT_LOAD` segments | `LC_SEGMENT` segments | the whole file at ADDR |
+| Code range | executable sections | `SHF_EXECINSTR` sections, else executable segments | instruction sections (not the self-modifying `__jump_table`) | the whole file |
+| Functions, with no map | none: a function map is needed | `.symtab` / `.dynsym` (`STT_FUNC`, `STT_GNU_IFUNC`) | `LC_SYMTAB`, each to the next symbol | none: a function map is needed |
+| Import stubs | (calls through the IAT) | every `.plt` / `.plt.sec` / `.plt.got` entry | every `__symbol_stub` | — |
+| Entry point | `AddressOfEntryPoint` | `e_entry` | `LC_MAIN` or `LC_UNIXTHREAD` | ADDR |
+| Load address | the image base | its addresses; a PIE / `.so` at `--base` | its addresses | ADDR |
+
+Notes on each format:
+
+- **PE.**
+  - Only the `mov eax, fs:[abs]` form of `fs:` (the Windows TEB) is translated, and it becomes a flat `[abs]`. MSVC's
+    SEH frames use that form for the exception-handler chain at `fs:[0]`. Every other `fs:` access needs an override.
+  - Segment registers read as the WOW64 selectors.
+- **ELF.**
+  - **PIE and shared-object placement.** A PIE or shared object, linked at address 0, is placed at `--base` (default
+    `56555000`, where Linux puts a 32-bit PIE). At address 0, small integers would pass for code addresses.
+  - **Relocations.** Its `R_386_RELATIVE` and `R_386_JMP_SLOT` relocations, and its `R_386_32` / `R_386_GLOB_DAT`
+    relocations to its own symbols, are applied, so pointer tables in its data hold run-time addresses.
+  - **Load base in the table.** The dispatch table then has `xrc_load_base`, which is where the runtime must load it.
+  - **Thread-local storage.** `gs:` and `fs:` accesses become `XRC_SEG_GS + address` (and `XRC_SEG_FS`). Loading a
+    segment register calls `xrc_set_seg`, so the runtime can look up the descriptor `set_thread_area` made.
+- **Mach-O.**
+  - Fat files are read for their i386 slice.
+  - The loader is tested on i386 Mach-O object files only. No i386 Mach-O linker was available to build a test
+    executable.
+  - `__jump_table` stubs are filled in by dyld at load time, so they are not code to translate. Calls to them go
+    through the dispatcher, where the runtime binds them.
+- **Raw.** The whole file is code and data at ADDR, writable, with its entry point at ADDR. A function map is needed.
+
+**Position-independent code** (ELF PIEs and shared objects, Mach-O):
+- **GOT-relative switch tables.** Switches through GOT-relative tables are recognized in two forms: GCC's
+  `mov r, [got + idx*4 + table]; add r, got; jmp r`, and the `add got, [got + idx*4 + table]; jmp got` that clang and
+  newer GCC emit. Each becomes a C `switch` on the computed target.
+- **The `call $+5; pop reg` idiom**, which reads the code's own address, is translated as the push it is.
 
 ## Command-line options
 
 | Option | What it does |
 |---|---|
-| `--exe FILE` | **Required.** The 32-bit PE to translate. It must be unpacked, since xrc reads its sections as they are in the file. |
-| `--override NAME` | The game folder. xrc looks for `overrides/NAME/` beside the xrc executable, then in the current directory, then takes `NAME` as a path. From that folder it uses the tables in `data/`, `xrc.cfg`, `overrides.tsv`, and the hand-written `.c`/`.h` files, which it copies to `<out>/overrides/`. `--override=NAME` works too. Without it, nothing is overridden and `--data` is needed. |
-| `--data DIR` | Take the tables from `DIR` instead of the game folder's `data/`. `--data=DIR` works too. |
+| `--exe FILE` | **Required.** The 32-bit x86 executable to translate: a PE, ELF or Mach-O file (detected from its contents), or a flat image with `--raw`. It must be unpacked, since xrc reads it as it is in the file. |
+| `--raw ADDR` | `--exe` is a flat image: the whole file is code and data, loaded at `ADDR` (hex), with its entry point at `ADDR`. Needs a function map. |
+| `--base ADDR` | Where a PIE or shared object (an ELF linked at 0) is placed: its addresses plus `ADDR` (hex). The default is `56555000`, where Linux puts a 32-bit PIE. The runtime must load it at the same address (the table's `xrc_load_base`). |
+| `--override NAME` | The game folder. xrc looks for `overrides/NAME/` beside the xrc executable, then in the current directory, then takes `NAME` as a path. From that folder it uses the tables in `data/`, `xrc.cfg`, `overrides.tsv`, and the hand-written `.c`/`.h` files, which it copies to `<out>/overrides/`. `--override=NAME` works too. Without it, nothing is overridden. |
+| `--data DIR` | Take the tables from `DIR` instead of the game folder's `data/`. `--data=DIR` works too. Without a function map there, xrc uses the executable's own symbols; with neither, it stops. |
 | `--all` | Translate every function in the function map, plus the entry points xrc finds itself. |
 | `--list FILE` | Translate only the functions listed in `FILE`: a hex address first on each line, `#` for comments. Optimizations that need the whole program (direct calls, inlining, devirtualization) are off. |
 | `--out DIR` | Write the page files (`page_XXXX.c`) to `DIR`. Without it nothing is written but the report: a coverage pass. |
@@ -211,8 +314,7 @@ overrides/Final Fantasy XIII/
 ├── overrides.tsv        the functions that are hand-written, wrapped, fast or unreachable
 ├── ovr_*.c / *.h        the hand-written routines (copied to <out>/overrides/)
 └── data/
-    ├── function_map.csv every function: address, name, size
-    ├── iat.json         the import address table
+    ├── function_map.csv every function: address, name, size (optional if the executable has symbols)
     ├── devirt_sites.txt (optional) the call-site profile for devirtualization
     ├── inline_hot.txt   (optional) the hot functions for inlining
     └── size_overrides.txt (optional) corrections to the map's sizes
@@ -230,15 +332,12 @@ address,name,size,thunk,size_source
 - A Ghidra export of the program's functions works.
 - The names matter only for the C runtime's x87 helpers, which xrc recognizes by name: `__CI*`, `*ftol*`,
   `__cintrindisp*`, `__ctrandisp*` and `__security_check_cookie`. Any other name is just a label.
+- Without the file, the executable's own symbols are the map (ELF `.symtab` / `.dynsym`, Mach-O `LC_SYMTAB`). With
+  it, the file is the map, and the executable's import stubs (PLT entries, Mach-O symbol stubs) are added.
 
-### `data/iat.json`
-
-```json
-{"0x1094424": ["d3dx9_43.dll", "D3DXLoadSurfaceFromMemory"], ...}
-```
-
-Every import slot: its address, its DLL and the imported function. Calls through a slot become calls to the
-runtime's implementation of that import.
+xrc needs no import table. Calls to imports are indirect calls through their slots (the IAT, the GOT), which hold
+whatever addresses the runtime puts there. Binding a program's imports is the runtime's job, from the executable's
+own import information.
 
 ### `data/size_overrides.txt`
 
@@ -304,6 +403,7 @@ The dispatch table (`xrc_table.c`) contains:
 - `xrc_fns[]` / `xrc_nfns`: every translated function as `{guest address, xf_<addr>}`, sorted.
 - `xrc_overrides[]` / `xrc_noverrides`: every function that is not translated, with why.
 - `xrc_entry`: the program's real entry point.
+- `xrc_load_base`, only for a PIE or shared object: where xrc placed it, so where the runtime loads it.
 - `xrc_hash_ranges[]` / `xrc_data_hash`: an FNV-1a hash of every non-code section as the file has them. The runtime
   can refuse to run with a different version of the program than the one translated. Code sections are left out,
   so a copy whose code is still encrypted (SteamStub) hashes the same.
@@ -333,20 +433,39 @@ The pages include only `include/xrc.h`. It defines:
 - the flag, x87 and SSE helpers;
 - the call macros (`XCALL`, `XCALLD*`, `XCALLX`, ...).
 
-A runtime has to provide what `xrc.h` declares `extern`, chiefly:
+A runtime has to provide what the generated code calls. The minimal set, as the example runtime implements it:
 
 | Symbol | What it is |
 |---|---|
-| `xrc_mem` | The base of guest memory. The executable's sections are loaded at their addresses in it. |
-| `xrc_dispatch(c, target)`, `xrc_dispatch_ic(c, target, ic)` | Runs the function at a guest address: a translation from `xrc_fns`, a hand-written routine, or an import. |
-| `xrc_imp_enter(slot)` | An import called through its IAT slot. |
-| `xrc_preempt()`, `xrc_preempt_n(c)`, `xrc_gil_waiters` | Cooperative scheduling of guest threads. The generated code checks `xrc_gil_waiters` at loop back-edges and calls. |
-| `xrc_bad_return(c, target)`, `xrc_ud(c, addr)`, `xrc_flbad(addr)`, `xrc_abi_violation(...)` | Error reporting: a return to an unexpected address, an undefined instruction, a wrong flag plan (`XRC_FL_VERIFY`), a callee that broke a register it was proven to keep. |
-| `xrc_tls_v` / `xrc_tls_slot`, `xrc_tstacks` | Per-thread state. |
+| `xrc_mem` | The base of guest memory, a 4 GB block; the executable's sections are loaded at their addresses in it. On x86-64 (not macOS), `xrc.h` puts guest memory at the fixed host address `0x7fff0000` unless `-DXRC_NO_FIXED_BASE` is given; then the runtime sets `xrc_mem`. |
+| `xrc_dispatch_ic(c, target, ic)` | Runs the function at a guest address: a translation from `xrc_fns`, a hand-written routine, or an import. It may fill the call site's cache `ic` with a translation. |
+| `xrc_imp_enter(slot)` | Called before a cached import runs, for runtimes that track the current import (may do nothing). |
+| `xrc_preempt_n(c)`, `xrc_gil_waiters` | Cooperative scheduling of guest threads. The generated code checks `xrc_gil_waiters` at loop back-edges and calls. A single-threaded runtime keeps it 0. |
+| `xrc_bad_return(c, target)`, `xrc_ud(c, addr)` | A function returned somewhere its caller did not expect, or an undefined or privileged instruction ran. |
+| `xrc_int(c, n)` | `int n`, e.g. Linux's `int 0x80` system calls. The registers are in `c`, and `c->eip` is the next instruction. |
+| `xrc_set_seg(c, seg, sel)`, `xrc_seg_fs`, `xrc_seg_gs` | A segment register was loaded (`seg` 4 is fs, 5 is gs), and the per-thread base `fs:` / `gs:` accesses add. Not in PE translations. |
 
-Beyond those, a runtime implements the program's imports (`kernel32`, `user32`, `d3d9`, ... on the host OS) and loads
-the executable's sections into guest memory. The FINAL FANTASY XIII port's runtime does all of that for that game; it
-is a separate project and is not included here. `include/xrc.h` is a copy of the header that runtime uses.
+Some builds need more:
+
+| Build | Symbols |
+|---|---|
+| `-DXRC_NO_IC` | `xrc_dispatch` in place of the inline cache |
+| `XRC_FL_VERIFY=1` translations | `xrc_flbad` |
+| `-DXRC_ABI_CHECK` | `xrc_abi_violation` |
+| a spin-wait loop in the program | `xrc_spin_yield` |
+| `-DXRC_DEEP_STACKS`, `-DXRC_COUNT_CALLS` | `xrc_tstacks`, `xrc_count_reg` |
+| a Windows host | `xrc_tls_slot` / `xrc_tls_new` |
+
+The dispatch table (`xrc_table.c`) includes `xrc_rt.h`, the runtime's own header, for three types: `XrcFn`,
+`XrcOverride` and `XrcRange`. `examples/linux-i386/runtime/xrc_rt.h` is the minimal version.
+
+Beyond those, a runtime implements the program's imports and loads the executable into guest memory:
+- **Imports** are `kernel32`, `user32`, `d3d9` and the rest for a Windows program, or libc and system calls for a Linux
+  one, implemented on the host OS.
+- **A PIE** is loaded at `xrc_load_base`, with the same relocations xrc applied.
+
+The FINAL FANTASY XIII port's runtime does all of that for that game. It is a separate project and is not included
+here. `include/xrc.h` is a copy of the header that runtime uses, with the additions for other formats.
 
 ## Tutorial: overrides for your own executable
 
@@ -360,20 +479,24 @@ program throughout.
 ```
 overrides/MyGame/
 ├── data/
-│   ├── function_map.csv
-│   └── iat.json
+│   └── function_map.csv (not needed if the executable has symbols)
 ├── overrides.tsv        (empty at first)
 └── xrc.cfg              (optional, empty at first)
 ```
 
-- **`function_map.csv`.** Load the unpacked executable into Ghidra (or another disassembler), let it analyze, and
-  export every function's address, name and size as `address,name,size` lines under a header line (see
-  [the format](#datafunction_mapcsv)). Names are only labels, except the C runtime x87 helpers listed there. A map
-  that misses functions is fine, since xrc finds the ones that calls and pointers reach, but every size has to be
-  right. Correct a wrong size with `data/size_overrides.txt` instead of editing the export.
-- **`iat.json`.** One entry per import slot, from the PE's import directory (any PE tool lists it, Ghidra too):
-  `{"0x<slot address>": ["<dll>", "<function>"], ...}`. xrc passes the names to the runtime unchanged, so an
-  import by ordinal can have any name your runtime binds it by.
+**`function_map.csv`** is only needed for an executable without symbols: most Windows programs, stripped Linux ones,
+and raw images.
+1. Load the unpacked executable into Ghidra (or another disassembler) and let it analyze.
+2. Export every function's address, name and size as `address,name,size` lines under a header line (see
+   [the format](#datafunction_mapcsv)). Names are only labels, except the C runtime x87 helpers listed there.
+3. Make sure every size is right. A map that misses functions is fine, since xrc finds the ones that calls and
+   pointers reach, but a wrong size is not. Correct one with `data/size_overrides.txt` instead of editing the export.
+
+For an ELF with symbols, `readelf -sW` gives the same thing:
+
+```sh
+{ echo address,name,size; readelf -sW prog | awk '$4 == "FUNC" && $3 > 0 {printf "%s,%s,%d\n", $2, $8, $3}'; } > function_map.csv
+```
 
 ### Step 2: find what needs an override
 
@@ -446,7 +569,8 @@ void XRC_CC my_ftol2(XCtx *c);
    ```
 
    The FINAL FANTASY XIII runtime has helpers for exactly this, `xrc_cdecl_ret(c)` and `xrc_stdcall_ret(c, N)`.
-3. **Keep ebx, esi, edi and ebp** as they were (the x86 calling conventions' callee-saved registers). The others
+3. **Keep ebx, esi, edi and ebp** as they were (the callee-saved registers of the x86 calling conventions, Windows'
+   and the System V i386 ABI's alike). The others
    (eax, ecx, edx, the flags) may be changed.
 
 Guest memory is reached with the same macros as the translations: `M8` / `M16` / `M32` / `M64` take a guest address.
@@ -675,7 +799,7 @@ xrc/
 ├── src/
 │   ├── main.odin             command line
 │   ├── config.odin           xrc.cfg
-│   ├── data.odin             the PE loader and the tables
+│   ├── data.odin             the PE / ELF / Mach-O / raw loaders, PIE relocation, the tables
 │   ├── overrides.odin        --override: overrides.tsv and copying the routines
 │   ├── rxdecode.odin         decoding (rexcode), jump tables
 │   ├── xrc.odin              the translator: functions, calls, the ABI plan, inlining, devirtualization,
@@ -684,6 +808,11 @@ xrc/
 │   ├── xrc_sync.odin         register-sync trimming
 │   ├── xrc_fp.odin           x87 and SSE
 │   └── xrc_ir.odin           the LLVM IR backend
+├── examples/
+│   └── linux-i386/           a Linux program translated and run (see Quick start)
+│       ├── demo.c, lib.c     the program and its shared library
+│       ├── run.sh            build, translate, compile, run, compare
+│       └── runtime/          a minimal runtime (runtime.c, xrc_rt.h)
 └── overrides/
     └── Final Fantasy XIII/   the example game folder (see The game folder)
 ```
@@ -703,8 +832,8 @@ license.
 This repository contains no game files and no code from any game:
 - **The translator** (`src/`), **the header** (`include/`) and **the patch** are original work.
 - **The FINAL FANTASY XIII folder** holds facts about the game's executable, not its code: function addresses, sizes
-  and Ghidra's library-signature names in `function_map.csv`; import names in `iat.json`; call counts and addresses
-  in the profiles; and a handful of addresses in `xrc.cfg`.
+  and Ghidra's library-signature names in `function_map.csv`; call counts and addresses in the profiles; and a
+  handful of addresses in `xrc.cfg`.
 - **Its `ovr_*.c` routines** are hand-written C that does what the corresponding functions of the game do, written
   from their behavior. For example, its sort follows the game's own sort step for step, so that equal elements come
   out in the same order.

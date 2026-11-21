@@ -60,14 +60,23 @@ x87_load_named :: proc() {
 		x87_named[p[0]] = {int(p[1]), int(p[2]), true, false, false}
 		if p[1] > 0 {x87_deep[p[0]] = true}
 	}
-	txt, ok := read_text(table_path("function_map.csv"))
-	if !ok {return}
-	for line in strings.split_lines_iterator(&txt) {
-		f := strings.split(line, ",", context.temp_allocator)
-		if len(f) < 2 {continue}
-		a, ok1 := hex_u32(f[0])
-		if !ok1 {continue}
-		n := f[1]
+	// the names: function_map.csv's, or the executable's symbols when it is the map
+	named := make([dynamic]struct {a: u32, n: string}, context.temp_allocator)
+	if map_from_symbols {
+		for a, n in exe.names {append(&named, struct {a: u32, n: string}{a, n})}
+	} else {
+		txt, ok := read_text(table_path("function_map.csv"))
+		if !ok {return}
+		for line in strings.split_lines_iterator(&txt) {
+			f := strings.split(line, ",", context.temp_allocator)
+			if len(f) < 2 {continue}
+			a, ok1 := hex_u32(f[0])
+			if !ok1 {continue}
+			append(&named, struct {a: u32, n: string}{a, f[1]})
+		}
+	}
+	for e in named {
+		a, n := e.a, e.n
 		switch {
 		// the CRT math intrinsics are stubs `mov edx, table; jmp __cintrindisp2/1` (or __ctrandisp*): naming the
 		// dispatchers lets x87_effect derive each stub's arguments from its tail jump
@@ -264,7 +273,7 @@ x87_flow :: proc(ins: []Rx_Ins, a, size: u32, entry: int, force: ^map[u32]int) -
 			r, why := x87_step(it, d)
 			if r < 0 {return bad(&fl, why, it.addr)}
 			nd = r
-		} else if m == .JMP && it.inst.ops[0].kind == .MEMORY && x87_table(ins, w.i, a, size, &tbl) {
+		} else if m == .JMP && rx_table_jmp(it) && x87_table(ins, w.i, a, size, &tbl) {
 			// a switch: every case at this depth (the default leaves as a tail call: record it like one)
 			for x in tbl {
 				if k, ok := idx[x]; ok {append(&work, W{k, d})}
