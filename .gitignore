@@ -1,0 +1,9 @@
+# build outputs
+/xrc
+*.exe
+*.pdb
+
+# a game's own executable never goes in the repository: keep it outside
+
+# translation output
+/out/

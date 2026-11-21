@@ -1,0 +1,94 @@
+diff --git a/core/rexcode/isa/x86/decoder.odin b/core/rexcode/isa/x86/decoder.odin
+index 69127337f..84a20b688 100644
+--- a/core/rexcode/isa/x86/decoder.odin
++++ b/core/rexcode/isa/x86/decoder.odin
+@@ -600,8 +600,12 @@ decode_opcode :: proc(state: ^Decoder_State) -> (entry: ^Decode_Entry, vex_entry
+ 					// No size prefix: the 32-bit accumulator form, or the plain
+ 					// no-flag form matching the mode default (PUSHFQ = 64-bit in
+ 					// long mode; CWDE/CDQ/IRETD = 32-bit).
+-					match = opsize_class_of(e.ops[0]) == .RM32 ||
+-						(!e.flags.force_rex_w && !e.flags.opsize_16 && bool(e.flags.default_64) == (state.mode == ._64))
++					// (In i386 the AX_IMPL/RAX_IMPL accumulator rows carry no size flag and are not default_64,
++					// so the mode-default test alone would take ADD AX,imm16 for 05 id: exclude sized rows.)
++					cls := opsize_class_of(e.ops[0])
++					match = cls == .RM32 ||
++						(!e.flags.force_rex_w && !e.flags.opsize_16 && bool(e.flags.default_64) == (state.mode == ._64) &&
++						 (state.mode != ._32 || (cls != .RM16 && cls != .RM64)))
+ 				}
+ 				if match { return e, nil, .NONE }
+ 			}
+@@ -1003,6 +1007,24 @@ decode_single_operand :: proc(state: ^Decoder_State, op_type: Operand_Type, op_e
+ 		return
+ 
+ 	case .IQ:
++		// moffs (A0-A3): the offset is address-size wide -- 4 bytes in i386 (8 in long mode, 4 with 67h there, 2
++		// under A16) -- not always 8.
++		#partial switch op_type {
++		case .MOFFS8, .MOFFS16, .MOFFS32, .MOFFS64:
++			asz := effective_addr_size(state.mode, state.prefix_67)
++			if asz != .A64 {
++				n := asz == .A16 ? 2 : 4
++				if state.position + n > len(state.data) {
++					err = .BUFFER_TOO_SHORT
++					return
++				}
++				v: u64 = 0
++				for k in 0..<n {v |= u64(state.data[state.position+k]) << uint(8*k)}
++				state.position += n
++				op = Operand{kind = .IMMEDIATE, immediate = i64(v), size = u8(n)}
++				return
++			}
++		}
+ 		// 64-bit immediate
+ 		if state.position + 8 > len(state.data) {
+ 			err = .BUFFER_TOO_SHORT
+@@ -1147,15 +1169,20 @@ decode_memory_operand :: proc(state: ^Decoder_State, modrm_info: ModRM_Info,
+ 		}
+ 	}
+ 
+-	// Read disp
+-	if modrm_info.disp_size == 1 {
++	// Read disp. SIB base=5 with mod=0 has no base but a disp32, which the ModR/M table (rm=4: "SIB follows",
++	// disp 0) cannot know: `jmp [eax*4 + table]` is FF 24 85 <disp32>.
++	disp_size := modrm_info.disp_size
++	if has_sib && sib_info.base == 5 && modrm_info.mod == 0 {
++		disp_size = 4
++	}
++	if disp_size == 1 {
+ 		if state.position >= len(state.data) {
+ 			err = .BUFFER_TOO_SHORT
+ 			return
+ 		}
+ 		disp = i32(i8(state.data[state.position]))
+ 		state.position += 1
+-	} else if modrm_info.disp_size == 4 {
++	} else if disp_size == 4 {
+ 		if state.position + 4 > len(state.data) {
+ 			err = .BUFFER_TOO_SHORT
+ 			return
+diff --git a/core/rexcode/isa/x86/encoder.odin b/core/rexcode/isa/x86/encoder.odin
+index 6fb4eebc8..0e0742991 100644
+--- a/core/rexcode/isa/x86/encoder.odin
++++ b/core/rexcode/isa/x86/encoder.odin
+@@ -802,7 +802,20 @@ encode :: proc(
+ 					pos += 4
+ 				}
+ 			case .IQ:
+-				if user_op.kind == .IMMEDIATE {
++				// moffs (A0-A3) outside long mode (or with 67h in it): an address-size (4-byte) offset
++				moffs32 := false
++				#partial switch enc.ops[slot] {
++				case .MOFFS8, .MOFFS16, .MOFFS32, .MOFFS64:
++					moffs32 = mode != ._64 || inst.flags.addr32
++				}
++				if moffs32 && user_op.kind == .IMMEDIATE {
++					v := u32(user_op.immediate)
++					out[pos+0] = u8(v)
++					out[pos+1] = u8(v >> 8)
++					out[pos+2] = u8(v >> 16)
++					out[pos+3] = u8(v >> 24)
++					pos += 4
++				} else if user_op.kind == .IMMEDIATE {
+ 					if user_op.flags.imm_is_label {
+ 						// movabs reg, <label>: placeholder imm64 + ABS64 relocation.
+ 						label_id := u32(user_op.immediate)

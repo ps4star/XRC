@@ -1,0 +1,161 @@
+# Guest functions that are not translated but covered (read by xrc --override="Final Fantasy XIII"; the ovr_*.c here
+# are copied with the pages to <out>/overrides/ and compiled with the runtime):
+#   manual       a hand-written replacement in ovr_*.c (here) (the runtime's xrc_manual_* tables)
+#   wrapped      translated, but replaced in the dispatcher by a hand-written function that falls back to the
+#                translation (so no translation calls it directly)
+#   fast         translated (the reference), but replaced by a hand-written xo_<addr> (ovr_simd.c) that
+#                the translations call directly and the dispatcher maps to
+#   unreachable  reached only from replaced functions / dead code (the runtime still stops with the override reason
+#                if one is ever dispatched)
+# address	kind	name / why
+0100eed4	manual	__libm_sse2_sin
+0100f5a2	manual	__libm_sse2_cos
+0100f75a	manual	__CIatan2
+0100f770	manual	cos
+0100f7b0	manual	__CIcos
+0100f7ff	manual	cos (x87 entry)
+0100f8a0	manual	sin
+0100f8e0	manual	__CIsin
+0100f92f	manual	sin (x87 entry)
+0100fd40	manual	_ftol2_sse
+0100fd76	manual	_ftol2
+010108a0	manual	__CIsqrt
+01012f2a	manual	__CIfmod
+01013b90	manual	__CIacos
+01013df0	manual	__CIpow
+010153b0	manual	__CIlog
+010154fc	manual	__CIexp
+01015590	manual	__CIatan
+0101f110	manual	tan
+0101f150	manual	__CItan
+01026fac	manual	__set_statfp_raise
+01011d90	wrapped	qsort (ovr_crt_sort.c: native for known comparators)
+00e8d220	wrapped	the frame pacer tick (ovr_game.c: XRC_FRAME_LIMIT builds replace it)
+00e8d560	wrapped	the main thread's frame wait (ovr_game.c: XRC_FRAME_LIMIT builds release it at once if due)
+0100f808	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0100f938	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+010108bd	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+01012f34	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+01013be8	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+01013e4d	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+01014012	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+01015408	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+010155e8	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101d5dc	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101d5e5	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101d620	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101d65e	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101d69b	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101d6e3	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101d6ea	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101d831	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101d864	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101d8c0	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101d8de	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101da70	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101dad7	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101dc33	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101dc40	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101dc6c	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101dc85	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101dceb	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101dd29	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101ddd0	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101dde7	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101de30	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101de4e	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0101f19f	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+010243f6	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+010245fc	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+01026090	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+01027080	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+01028200	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+01028470	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+01028730	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0102e610	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+0106be30	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
+004559b0	fast	Matrix44::Transform (ovr_simd.c)
+00455840	fast	Vec4::operator= (ovr_simd.c)
+00455880	fast	Vec4::Get (ovr_simd.c)
+004586c0	fast	Aabb::Extended (ovr_simd.c)
+00710860	fast	Vec4::Dot4 (ovr_simd.c)
+00711f40	fast	Matrix33::Transform (ovr_simd.c)
+00455f00	fast	Matrix44::Transform(m128) (ovr_simd.c)
+004584c0	fast	Matrix44::TransformPoint (ovr_simd.c)
+00455d80	fast	Matrix44::Get (ovr_simd.c)
+00462f80	fast	Matrix44::operator= (ovr_simd.c)
+00d785d0	fast	the collision broadphase's BVH build step (ovr_bvh.c)
+00c77820	fast	zlib inflate_fast: the translation, run without the GIL (ovr_unlocked.c)
+00457e50	fast	Aabb::Transformed (ovr_simd.c)
+00456970	fast	Matrix44::Mul (ovr_simd.c)
+00743c70	fast	Quat::Mul (ovr_simd.c)
+00744160	fast	QuatToMatrix (ovr_simd.c)
+00517130	fast	QuatToMatrix2 (ovr_simd.c)
+00515c00	fast	Quat::FromMatrix33 (ovr_simd.c)
+00e8d5a0	fast	frame due: a minimum of idle work per frame (ovr_game.c)
+00c4d840	fast	Matrix44::Transposed (ovr_simd.c)
+00ea2bc0	fast	Bone::UpdateWorld: a skeleton bone's world and skinning matrices (ovr_simd.c)
+00534b70	fast	Matrix44::Matrix44(const Matrix44&) (ovr_simd.c)
+00457750	fast	Matrix44::Mul, a second copy (ovr_simd.c)
+0074dbf0	fast	Matrix44::Transform, a second copy (ovr_simd.c)
+00456f30	fast	Vec4::Dot3 (ovr_simd.c)
+00536990	fast	Matrix44::Inverse (ovr_simd.c)
+005b9d70	fast	Vec4::Mul (ovr_simd.c)
+0045a960	fast	Vec4::Sub (ovr_simd.c)
+00462cd0	fast	Matrix44::Matrix44(4 rows) (ovr_simd.c)
+00458460	fast	Vec4::Add (ovr_simd.c)
+00710f50	fast	Vec4::Sub(m128) (ovr_simd.c)
+00cae180	fast	Vec4::Max (ovr_simd.c)
+00727710	fast	Vec4::Scale (ovr_simd.c)
+00517c80	fast	Vec4::Neg (ovr_simd.c)
+00727690	fast	Vec4::Vec4(x, y, z, w) (ovr_simd.c)
+00c28db0	fast	Matrix44::Matrix44(4 m128 rows) (ovr_simd.c)
+00db4dd0	fast	Matrix44::Abs (ovr_simd.c)
+00ec2890	fast	D3D proxy SetVertexShaderConstantF (ovr_simd.c)
+00ec25f0	fast	D3D proxy SetSamplerState (ovr_simd.c)
+00ec2950	fast	D3D proxy SetStreamSourceFreq (ovr_simd.c)
+00ec29b0	fast	D3D proxy SetPixelShaderConstantF (ovr_simd.c)
+00ec2910	fast	D3D proxy SetVertexShaderConstantB (ovr_simd.c)
+00ec2810	fast	D3D proxy forwarder 0x15c (ovr_simd.c)
+00ec2870	fast	D3D proxy forwarder 0x170 (ovr_simd.c)
+00ec2990	fast	D3D proxy forwarder 0x1ac (ovr_simd.c)
+00ec2830	fast	D3D proxy forwarder 0x164 (ovr_simd.c)
+00ec24d0	fast	D3D proxy SetRenderState (ovr_simd.c)
+00ec3370	fast	D3D proxy SetStreamSource (ovr_simd.c)
+00ec3230	fast	D3D proxy SetTexture (ovr_simd.c)
+00f14110	fast	Shapes::Overlap: a box against a list of shapes (ovr_simd.c)
+00c43bf0	fast	Aabb::Extended, unaligned (ovr_simd.c)
+00eac800	fast	Render::BindStreams: the 16 vertex streams of a draw (ovr_simd.c)
+00ec1ff0	fast	Render::Forget: a scan of the 32768-entry pointer table (ovr_simd.c)
+00ad4ef0	fast	Vec4::SetW (xmm), register arguments (ovr_simd.c)
+00ad5090	fast	Vec4::Cross (xmm), register arguments (ovr_simd.c)
+00ad4f50	fast	Vec4::Dot3 (xmm), register arguments (ovr_simd.c)
+00ad51c0	fast	Vec4::Rcp (xmm), register arguments (ovr_simd.c)
+00eac130	fast	Render::SetStream: a stream table entry (ovr_simd.c)
+00f49840	fast	VertexLayout::Bind: a draw's streams into the table (ovr_simd.c)
+01010960	fast	floor (ovr_simd.c)
+01011050	fast	ceil (ovr_simd.c)
+0100f08c	fast	__libm_sse2_atan2 (ovr_simd.c)
+00ad5550	fast	Matrix44::InverseAffine (ovr_simd.c)
+00514a60	fast	Quat::Dot4 (ovr_simd.c)
+00514b20	fast	Quat::Acos (ovr_simd.c)
+00514fe0	fast	Quat::Sin (ovr_simd.c)
+005168e0	fast	Quat::Slerp (ovr_simd.c)
+00eaba90	fast	Render SetVertexShaderConstantF(reg, data, n) (ovr_simd.c)
+00eabab0	fast	Render SetVertexShaderConstantF(reg, data, 4) (ovr_simd.c)
+00eaba70	fast	Render SetVertexShaderConstantF(reg, data, 1) (ovr_simd.c)
+00eabc60	fast	Render SetTexture(stage, tex) (ovr_simd.c)
+00eac1c0	fast	Render SetVertexShader (ovr_simd.c)
+00eac1f0	fast	Render SetPixelShader (ovr_simd.c)
+00eacf50	fast	Render SetIndices (ovr_simd.c)
+00eaf1b0	fast	Render EndScene (ovr_simd.c)
+00c27cf0	fast	SetPixelShaderConstantF(i, reg) wrapper (ovr_simd.c)
+00f32f40	fast	SetVertexShaderConstantF(tab, reg, data) wrapper (ovr_simd.c)
+00eac520	fast	Render sampler address modes (ovr_simd.c)
+00eac590	fast	Render sampler filters + LOD bias (ovr_simd.c)
+00eac780	fast	Render render states (3 from tables) (ovr_simd.c)
+00eac720	fast	Render render states (table, 0x39, 0x3a) (ovr_simd.c)
+00ea26b0	fast	bone matrix moves (00ea6f30 loop) (ovr_simd.c)
+00ea3b50	fast	skeleton bone update loop (ovr_simd.c)
+00f08f70	fast	child list vtbl[2] loop (ovr_simd.c)
+008d86d0	fast	node update + children vtbl[1] loop (ovr_simd.c)
