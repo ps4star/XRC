@@ -2125,16 +2125,31 @@ cmd_xrc :: proc(args: []string) -> int {
 		// the report, the table and the manifest are put together here in address order (the output of one thread)
 		tp := time.tick_now()
 		jobs := make([dynamic]X_Page_Job)
-		for k := 0; k < len(addrs); {
+		// (the hot functions of a profile in pages of their own, xrc_layout.odin; the rest by address)
+		hot_pages: [][]u32
+		if all {hot_pages = x_layout_plan(addrs[:], funcs)}
+		rest := addrs[:]
+		if len(x_hot_set) > 0 {
+			r := make([dynamic]u32, 0, len(addrs))
+			for a in addrs {if !(a in x_hot_set) {append(&r, a)}}
+			rest = r[:]
+		}
+		for k := 0; k < len(rest); {
 			e := k
-			for e < len(addrs) && addrs[e] >> 16 == addrs[k] >> 16 {e += 1}
-			append(&jobs, X_Page_Job{page = addrs[k] >> 16, addrs = addrs[k:e], recs = make([]X_Fn_Rec, e - k)})
+			for e < len(rest) && rest[e] >> 16 == rest[k] >> 16 {e += 1}
+			append(&jobs, X_Page_Job{page = rest[k] >> 16, addrs = rest[k:e], recs = make([]X_Fn_Rec, e - k)})
 			k = e
 		}
+		for hp, hi in hot_pages {append(&jobs, X_Page_Job{page = X_HOT_PAGE + u32(hi), addrs = hp, recs = make([]X_Fn_Rec, len(hp))})}
+		if out != "" {x_layout_clean(out, len(hot_pages))}
 		x_jobs, x_job_out = jobs[:], out
 		x_par_run(len(jobs), x_page_job)
-		for &j in jobs {
-			for r in j.recs {
+		// (the records in address order again: the report, the table and the dispatcher's search need it)
+		all_recs := make([dynamic]X_Fn_Rec, 0, len(addrs))
+		for &j in jobs {for r in j.recs {append(&all_recs, r)}}
+		slice.sort_by(all_recs[:], proc(x, y: X_Fn_Rec) -> bool {return x.a < y.a})
+		for r in all_recs {
+			{
 				a := r.a
 				if r.ok {
 					n_ok += 1
@@ -2153,6 +2168,8 @@ cmd_xrc :: proc(args: []string) -> int {
 					append(&ovr_list, Ovr{a, r.reason})
 				}
 			}
+		}
+		for &j in jobs {
 			if out != "" {
 				n_pages += 1
 				if j.changed {n_written += 1}
@@ -2597,10 +2614,11 @@ x_flush_page :: proc(dir: string, page: u32, sb: ^strings.Builder) -> bool {
 x_flush_page_rec :: proc(dir: string, page: u32, sb: ^strings.Builder) -> (bool, string) {
 	if strings.builder_len(sb^) == 0 {
 		// (--llvm: every function of the page is in its .ll -- an older .c of it must go, or both define them)
-		if ir_mode {if p := fmt.tprintf("%s/page_%04x.c", dir, page); os.exists(p) {os.remove(p); return true, ""}}
+		// (and a page whose functions all moved to the hot pages, xrc_layout.odin, or else they are defined twice)
+		if p := fmt.tprintf("%s/page_%04x.c", dir, page); os.exists(p) {os.remove(p); return true, ""}
 		return false, ""
 	}
-	hdr := fmt.tprintf("/* page %04x0000: x86->C (xrc). Generated; do not edit. */\n#define XRC_PAGE 1\n#include \"xrc.h\"\n", page)
+	hdr := page >= X_HOT_PAGE ? fmt.tprintf("/* hot page %d: x86->C (xrc), the profile's hot functions (xrc_layout.odin). Generated; do not edit. */\n#define XRC_PAGE 1\n#include \"xrc.h\"\n", page - X_HOT_PAGE) : fmt.tprintf("/* page %04x0000: x86->C (xrc). Generated; do not edit. */\n#define XRC_PAGE 1\n#include \"xrc.h\"\n", page)
 	body := strings.to_string(sb^)
 	name := fmt.tprintf("page_%04x.c", page)
 	path := fmt.tprintf("%s/%s", dir, name)
