@@ -291,11 +291,13 @@ XRC_INLINE u64 xsh64r(u64 v, u32 n) { u32 lo = (u32)v, hi = (u32)(v >> 32); if (
 /* 16 bytes from/to guest memory (any alignment) */
 #ifdef XRC_VEC
 #define XLD(x_, a_) ((x_).vi = _mm_loadu_si128((const __m128i *)(XM + (u32)(a_))))
+#define XLDC(x_, a_, b_, c_, d_) ((x_).vi = _mm_set_epi32((int)(d_), (int)(c_), (int)(b_), (int)(a_))) /* (read-only data folded: xrc_rdfold.odin) */
 #define XST(a_, x_) _mm_storeu_si128((__m128i *)(XM + (u32)(a_)), (x_).vi)
 #define XLDX(x_, a_) ((x_).vi = _mm_loadu_si128((const __m128i *)(XM + (a_))))
 #define XSTX(a_, x_) _mm_storeu_si128((__m128i *)(XM + (a_)), (x_).vi)
 #else
 #define XLD(x_, a_) ((x_).u[0] = M32(a_), (x_).u[1] = M32((a_) + 4), (x_).u[2] = M32((a_) + 8), (x_).u[3] = M32((a_) + 12))
+#define XLDC(x_, a_, b_, c_, d_) ((x_).u[0] = (a_), (x_).u[1] = (b_), (x_).u[2] = (c_), (x_).u[3] = (d_))
 #define XST(a_, x_) (M32(a_) = (x_).u[0], M32((a_) + 4) = (x_).u[1], M32((a_) + 8) = (x_).u[2], M32((a_) + 12) = (x_).u[3])
 #define XLDX(x_, a_) XLD(x_, (u32)(a_))
 #define XSTX(a_, x_) XST((u32)(a_), x_)

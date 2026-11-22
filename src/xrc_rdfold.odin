@@ -44,12 +44,27 @@ rd_ident :: #force_inline proc(ch: u8) -> bool {
 // the instruction emitted from start on, its address the constant a: its reads through _ea as values
 x_rdata_fold :: proc(xl: ^Xlat, start: int, a: u32) {
 	seg := string(xl.b.buf[start:])
-	if strings.index(seg, "(_ea") < 0 {return}
+	if strings.index(seg, "(_ea") < 0 && strings.index(seg, ", _ea)") < 0 {return}
 	if strings.index(seg, "XST(_ea") >= 0 || strings.index(seg, "XSTX(_ea") >= 0 {return} // (a store)
 	out := strings.builder_make(context.temp_allocator)
 	i := 0
 	folded := false
 	scan: for i < len(seg) {
+		// a 128-bit load, XLD(target, _ea): XLDC(target, the four dwords)
+		if strings.has_prefix(seg[i:], "XLD(") && (i == 0 || !rd_ident(seg[i - 1])) {
+			j := i + 4
+			c := strings.index(seg[j:], ", _ea)")
+			if c < 0 {return}
+			tgt := seg[j:j + c]
+			for ch in transmute([]u8)tgt {if !rd_ident(ch) && ch != '[' && ch != ']' && ch != '.' {return}} // (X[0], XI[1], _s)
+			lo, ok1 := x_rdata_const(a, 8)
+			hi, ok2 := x_rdata_const(a + 8, 8)
+			if !ok1 || !ok2 {return}
+			fmt.sbprintf(&out, "XLDC(%s, 0x%xu, 0x%xu, 0x%xu, 0x%xu)", tgt, u32(lo), u32(lo >> 32), u32(hi), u32(hi >> 32))
+			folded = true
+			i = j + c + len(", _ea)")
+			continue scan
+		}
 		for m in rd_macs {
 			if !strings.has_prefix(seg[i:], m.name) || (i > 0 && rd_ident(seg[i - 1])) {continue}
 			j := i + len(m.name)
