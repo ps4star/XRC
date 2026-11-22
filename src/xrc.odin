@@ -18,6 +18,8 @@ import "core:os"
 import "core:slice"
 import "core:strconv"
 import "core:strings"
+import "core:sync"
+import "core:thread"
 import "core:time"
 import x86 "core:rexcode/isa/x86"
 
@@ -87,6 +89,7 @@ x_direct_ok: map[u32]bool
 // usual (the reference it is checked against), but direct calls go to xo_<addr>
 x_fast: map[u32]bool
 x_direct_used: map[u32]bool
+x_direct_mu: sync.Mutex // (the translation runs on several threads: x_par_run)
 // the callee-saved registers each function keeps for its caller (x_abi_plan): bit 0 ebx, 1 esi, 2 edi, 3 ebp. A
 // direct call reloads from XCtx only the registers its callee may change (XCALLDK's mask: eax ecx edx esp always,
 // and the callee-saved ones it does not keep); the caller's own locals hold the rest across the call
@@ -197,14 +200,18 @@ x_abi_scan :: proc(a: u32, size: u32) -> (f: X_Abi_Fn) {
 	if !leaves {f.own = 0xf; clear(&f.calls)}
 	return
 }
+x_abi_addrs: []u32
+x_abi_res: []X_Abi_Fn
 x_abi_plan :: proc(addrs: []u32, funcs: map[u32]u32) {
 	x_abi_keep = make(map[u32]u8)
 	if os.get_env("XRC_ABI_KEEP", context.temp_allocator) == "0" {return}
-	fns := make(map[u32]X_Abi_Fn)
-	for a in addrs {
-		fns[a] = x_abi_scan(a, funcs[a])
-		free_all(context.temp_allocator)
-	}
+	// (the scans on every core: x_par_run)
+	x_abi_addrs = addrs
+	x_abi_res = make([]X_Abi_Fn, len(addrs))
+	x_par_run(len(addrs), proc(i: int) {x_abi_res[i] = x_abi_scan(x_abi_addrs[i], funcs[x_abi_addrs[i]])})
+	fns := make(map[u32]X_Abi_Fn, len(addrs))
+	for a, i in addrs {fns[a] = x_abi_res[i]}
+	delete(x_abi_res)
 	for a, f in fns {x_abi_keep[a] = f.own}
 	// the frame helpers (xrc.cfg), whatever the scan says: a prolog changes its caller's ebp (keeps ebx esi edi: it
 	// pushes them unchanged), an epilog restores all four (each changes)
@@ -239,6 +246,7 @@ x_abi_plan :: proc(addrs: []u32, funcs: map[u32]u32) {
 
 // (a segment / control / debug / MMX register here -- garbage decoded as code, or an instruction the translator does
 // not model -- sets x_bad_reg; x_translate then fails the function with "register")
+@(thread_local)
 x_bad_reg: bool
 
 x_home :: proc(r: x86.Register) -> string {
@@ -1306,17 +1314,58 @@ x_inline_plan :: proc(addrs: []u32, funcs: map[u32]u32) {
 	}
 	// (x87 calls, the float compare macro, the flag check's shadows)
 	// (XRC_UD: a fatal error, reported as in the function it is in)
-	BAD :: [?]string{"XRC_FRET", "XFCOMI", "x_fa", "x_fret", "p_op", "XRC_THUNK", "LX_", "ic_", "XRC_RETURNX", "XRC_UD"}
 	x_inline_off = true
 	nl, nc := 0, 0
 	why: u32 = 0 // XRC_INLINE_WHY=addr: what keeps that function from being inlined (a diagnostic)
 	if v := os.get_env("XRC_INLINE_WHY", context.temp_allocator); v != "" {why, _ = hex_u32(v)}
 	if why != 0 {fmt.printf("xrc: inline %08x: direct_ok %v fast %v size %d\n", why, why in x_direct_ok, why in x_fast, funcs[why])}
+	cands := make([dynamic]u32)
 	for a in addrs {
 		if !(a in x_direct_ok) || a in x_fast || (hot != nil && !(a in hot)) {continue}
 		// (bytes: no use translating a long one -- loosely: the map's size runs to the next function it knows, padding
 		// and code it never saw included; the instruction count decides)
 		if funcs[a] == 0 || funcs[a] > 4096 {continue}
+		append(&cands, a)
+	}
+	// (the candidates on every core: x_inline_one; then in address order into x_inline)
+	x_ipl_cands, x_ipl_maxn, x_ipl_hotmax, x_ipl_hotl, x_ipl_why = cands[:], maxn, hotmax, hotl, why
+	x_ipl_out = make([]X_Inline_Out, len(cands))
+	x_par_run(len(cands), x_inline_one)
+	for o, k in x_ipl_out {
+		if !o.ok {continue}
+		x_inline[cands[k]] = o.il
+		if o.calls {nc += 1} else {nl += 1}
+	}
+	delete(x_ipl_out)
+	delete(cands)
+	x_inline_off = false
+	fmt.printf("xrc: %d functions of up to %d instructions inlined at their direct calls (%d leaves, %d that call)\n", len(x_inline), maxn, nl, nc)
+}
+
+// one inlining candidate (x_inline_plan, on the translation threads): translated without inlining in it, kept if small,
+// self-contained and returning
+X_INLINE_BAD :: [?]string{"XRC_FRET", "XFCOMI", "x_fa", "x_fret", "p_op", "XRC_THUNK", "LX_", "ic_", "XRC_RETURNX", "XRC_UD"}
+X_Inline_Out :: struct {ok, calls: bool, il: X_Inline}
+x_ipl_cands: []u32
+x_ipl_out: []X_Inline_Out
+x_ipl_maxn, x_ipl_hotmax: int
+x_ipl_hotl: map[u32]bool
+x_ipl_why: u32
+
+x_inline_one :: proc(idx: int) {
+	a := x_ipl_cands[idx]
+	maxn, hotmax, why := x_ipl_maxn, x_ipl_hotmax, x_ipl_why
+	hotl := &x_ipl_hotl
+	BAD :: X_INLINE_BAD
+	{
+		// (the instruction count first, from the decoder alone: translating one too long to qualify is wasted -- most are)
+		if a != why {
+			pre, pbad := rx_function(a, funcs[a], context.temp_allocator)
+			limit := a in hotl ? max(maxn, hotmax) : maxn
+			np := len(pre)
+			free_all(context.temp_allocator)
+			if pbad == 0 && np > limit {return}
+		}
 		xl := x_translate(a, funcs[a])
 		ok := xl.ok && (xl.nins <= maxn || (a in hotl && xl.nins <= hotmax)) && !xl.uses_fp && !xl.uses_mm && len(xl.slots) == 0 && !xl.fret
 		body := strings.to_string(xl.b)
@@ -1375,17 +1424,13 @@ x_inline_plan :: proc(addrs: []u32, funcs: map[u32]u32) {
 			if ok {
 				il.body = t
 				il.direct = slice.clone(xl.direct[:])
-				x_inline[a] = il
-				if calls {nc += 1} else {nl += 1}
+				x_ipl_out[idx] = {true, calls, il}
 			}
 		}
 		strings.builder_destroy(&xl.b)
 		delete(xl.labels)
 		delete(xl.direct)
-		free_all(context.temp_allocator)
 	}
-	x_inline_off = false
-	fmt.printf("xrc: %d functions of up to %d instructions inlined at their direct calls (%d leaves, %d that call)\n", len(x_inline), maxn, nl, nc)
 }
 
 // the inlined call at ins (a direct call to target): the callee's body in place, its labels L_X as L_X_<site>, its
@@ -1537,7 +1582,7 @@ x_call_fp :: proc(xl: ^Xlat, ins: ^Rx_Ins, t: string, key: u32 = 0, direct: u32 
 	pf(xl, "    x_ra_ = %s;", ra != "" ? ra : x_hexu(u32(ins.addr + ins.len)))
 	d := direct != 0 && direct in x_direct_ok
 	if d && !xl.dry {
-		x_direct_used[direct] = true
+		sync.mutex_lock(&x_direct_mu); x_direct_used[direct] = true; sync.mutex_unlock(&x_direct_mu)
 		append(&xl.direct, direct)
 	}
 	if e.transparent || (e.kin == 0 && e.kout == 0) {
@@ -2033,6 +2078,11 @@ cmd_xrc :: proc(args: []string) -> int {
 	}
 	x_abi_plan(addrs[:], funcs)
 	lap(x_timing, &t_last, "callee-saved registers")
+	// (every function's x87 effect first, in address order: the threads after it only read them)
+	x87_precompute()
+	x_sync_init()
+	_, _, _ = x_fl_disabled(), x_fl_verify(), x_fl_debug()
+	lap(x_timing, &t_last, "x87 effects")
 	if all {x_inline_plan(addrs[:], funcs); x_devirt_load()}
 	lap(x_timing, &t_last, "inlining plan")
 	n_inl_sites, n_dv_sites := 0, 0
@@ -2046,7 +2096,51 @@ cmd_xrc :: proc(args: []string) -> int {
 	pg := strings.builder_make()
 	cur_page: u32 = 0xffffffff
 	n_pages, n_written := 0, 0
+	if out != "" {os.make_directory(out); x_pages_load(out)}
+	if !ir_mode {
+		// a page at a time on every core (x_par_run: XRC_THREADS), each page's functions in address order into its file;
+		// the report, the table and the manifest are put together here in address order (the output of one thread)
+		tp := time.tick_now()
+		jobs := make([dynamic]X_Page_Job)
+		for k := 0; k < len(addrs); {
+			e := k
+			for e < len(addrs) && addrs[e] >> 16 == addrs[k] >> 16 {e += 1}
+			append(&jobs, X_Page_Job{page = addrs[k] >> 16, addrs = addrs[k:e], recs = make([]X_Fn_Rec, e - k)})
+			k = e
+		}
+		x_jobs, x_job_out = jobs[:], out
+		x_par_run(len(jobs), x_page_job)
+		for &j in jobs {
+			for r in j.recs {
+				a := r.a
+				if r.ok {
+					n_ok += 1
+					n_inl_sites += r.inl
+					n_dv_sites += r.dv
+					fmt.sbprintf(&rpt, "%08x\tok\t%d\t\n", a, r.nins)
+					append(&ok_list, a)
+				} else if k, okk := covered[a]; okk {
+					if k == "manual" {n_manual += 1} else {n_unreach += 1}
+					fmt.sbprintf(&rpt, "%08x\t%s\t%d\t%s\n", a, k, r.nins, r.reason)
+					append(&ovr_list, Ovr{a, r.reason})
+				} else {
+					n_bad += 1
+					reasons[r.reason] += 1
+					fmt.sbprintf(&rpt, "%08x\toverride\t%d\t%s\n", a, r.nins, r.reason)
+					append(&ovr_list, Ovr{a, r.reason})
+				}
+			}
+			if out != "" {
+				n_pages += 1
+				if j.changed {n_written += 1}
+				strings.write_string(&x_pages_new, j.line)
+			}
+		}
+		t_flush = x_flush_time
+		_ = tp
+	}
 	for a in addrs {
+		if !ir_mode {break}
 		if out != "" && a >> 16 != cur_page {
 			if cur_page != 0xffffffff {
 				n_pages += 1
@@ -2080,11 +2174,13 @@ cmd_xrc :: proc(args: []string) -> int {
 		delete(xl.direct)
 		free_all(context.temp_allocator)
 	}
-	if out != "" && cur_page != 0xffffffff {
-		n_pages += 1
+	if out != "" && (cur_page != 0xffffffff || n_pages > 0) {
 		tf := time.tick_now()
-		if x_flush_page(out, cur_page, &pg) {n_written += 1}
-		ir_flush_page(out, cur_page, &irm)
+		if cur_page != 0xffffffff {
+			n_pages += 1
+			if x_flush_page(out, cur_page, &pg) {n_written += 1}
+			ir_flush_page(out, cur_page, &irm)
+		}
 		x_pages_save()
 		t_flush += time.tick_since(tf)
 		fmt.printf("xrc: %d page files in %s, %d changed; %d calls inlined, %d indirect calls devirtualized\n", n_pages, out, n_written, n_inl_sites, n_dv_sites)
@@ -2145,14 +2241,47 @@ cmd_xrc :: proc(args: []string) -> int {
 // into .text found in a data-section dword or an instruction immediate, that is no known function's start and no
 // instruction any known function reaches, becomes a function (sized to the next start); repeated until none are new
 // (the new functions' code has references too). They are added to funcs / fstarts.
+// one function's decode for x_discover_entries (x_par_run): what it covers and refers to, and the switch tables the
+// decoder found in it (the thread's rx_table_slots / rx_byte_tables swapped out around it)
+X_Disc_Res :: struct {
+	covered, ends, calls, refs: [dynamic]u32,
+	slots: map[u32][dynamic][2]u32,
+	bts:   map[u32]Rx_Byte_Table,
+}
+x_disc_todo: []u32
+x_disc_res: []X_Disc_Res
+
+x_disc_one :: proc(n: int) {
+	a := x_disc_todo[n]
+	r := &x_disc_res[n]
+	saved_s, saved_b := rx_table_slots, rx_byte_tables
+	rx_table_slots, rx_byte_tables = nil, nil
+	ins, _ := rx_function(a, funcs[a], context.temp_allocator)
+	r.covered = make([dynamic]u32, 0, len(ins))
+	for &i in ins {
+		append(&r.covered, i.addr)
+		if rx_is_branch_end(i.inst.mnemonic) {append(&r.ends, i.addr + i.len)}
+		// (not `call $+5`: PIC code's way of reading its own address, a push and no function)
+		if i.inst.mnemonic == .CALL && i.inst.operand_count > 0 && i.inst.ops[0].kind == .RELATIVE && rx_rel_target(&i, 0) != i.addr + i.len {
+			append(&r.calls, rx_rel_target(&i, 0))
+		}
+		for k in 0 ..< int(i.inst.operand_count) {
+			if i.inst.ops[k].kind == .IMMEDIATE {append(&r.refs, u32(i32(i.inst.ops[k].immediate)))}
+		}
+	}
+	r.slots, r.bts = rx_table_slots, rx_byte_tables
+	rx_table_slots, rx_byte_tables = saved_s, saved_b
+}
+
 x_discover_entries :: proc() -> [dynamic]u32 {
 	found := make([dynamic]u32)
-	covered := make(map[u32]bool)
+	// (the instructions decoded: a bit per byte of .text -- only code addresses are looked up in it)
+	covered := make([]u64, (int(exe.text_hi - exe.text_lo) + 63) / 64)
 	refs := make(map[u32]bool)
 	for s in exe.secs {
 		if s.chars & 0x20000000 != 0 {continue} // (code: its immediates are taken from decoded instructions)
 		b := exe_read(s.base, int(min(s.vsize, s.rsize)))
-		for o := 0; o + 4 <= len(b); o += 4 {refs[u32le(b, o)] = true}
+		for o := 0; o + 4 <= len(b); o += 4 {if v := u32le(b, o); v >= exe.text_lo && v < exe.text_hi {refs[v] = true}}
 	}
 	// where a known function's code ends (after a ret / jmp, or after its switch tables): a function laid out right
 	// behind it starts there
@@ -2163,21 +2292,24 @@ x_discover_entries :: proc() -> [dynamic]u32 {
 	todo := make([dynamic]u32)
 	append(&todo, ..fstarts[:])
 	for len(todo) > 0 {
-		for a in todo {
-			ins, _ := rx_function(a, funcs[a], context.temp_allocator)
-			for &i in ins {
-				covered[i.addr] = true
-				if rx_is_branch_end(i.inst.mnemonic) {ends[i.addr + i.len] = true}
-				// (not `call $+5`: PIC code's way of reading its own address, a push and no function)
-				if i.inst.mnemonic == .CALL && i.inst.operand_count > 0 && i.inst.ops[0].kind == .RELATIVE && rx_rel_target(&i, 0) != i.addr + i.len {
-					calls[rx_rel_target(&i, 0)] = true
-				}
-				for k in 0 ..< int(i.inst.operand_count) {
-					if i.inst.ops[k].kind == .IMMEDIATE {refs[u32(i32(i.inst.ops[k].immediate))] = true}
-				}
+		// (decoded on every core: x_disc_one; merged in this order, the switch tables as one thread would have left them)
+		x_disc_todo = todo[:]
+		x_disc_res = make([]X_Disc_Res, len(todo))
+		x_par_run(len(todo), x_disc_one)
+		if rx_table_slots == nil {rx_table_slots = make(map[u32][dynamic][2]u32); rx_byte_tables = make(map[u32]Rx_Byte_Table)}
+		for &r in x_disc_res {
+			for v in r.covered {if v >= exe.text_lo && v < exe.text_hi {o := v - exe.text_lo; covered[o >> 6] |= 1 << (o & 63)}}
+			for v in r.ends {ends[v] = true}
+			for v in r.calls {calls[v] = true}
+			for v in r.refs {if v >= exe.text_lo && v < exe.text_hi {refs[v] = true}}
+			for k, v in r.slots {
+				if old, had := rx_table_slots[k]; had {delete(old)}
+				rx_table_slots[k] = v
 			}
-			free_all(context.temp_allocator)
+			for k, v in r.bts {rx_byte_tables[k] = v}
+			delete(r.covered); delete(r.ends); delete(r.calls); delete(r.refs); delete(r.slots); delete(r.bts)
 		}
+		delete(x_disc_res)
 		clear(&todo)
 		// a function laid out right behind another's switch tables (jump table / byte index table) starts at their end
 		// (not where the next dword is another code address: the switch read only the start of a longer table)
@@ -2195,7 +2327,7 @@ x_discover_entries :: proc() -> [dynamic]u32 {
 		}
 		for v in refs {
 			if v in calls {continue}
-			if v < exe.text_lo || v >= exe.text_hi || v in funcs || v in covered {continue}
+			if v < exe.text_lo || v >= exe.text_hi || v in funcs || covered[(v - exe.text_lo) >> 6] & (1 << ((v - exe.text_lo) & 63)) != 0 {continue}
 			b := exe_read(v, 1)
 			if len(b) == 0 || b[0] == 0xcc || b[0] == 0x00 {continue} // padding / zero fill
 			// a function start is aligned behind padding, or right behind the previous function's last instruction
@@ -2360,14 +2492,91 @@ x_file_mtime :: proc(path: string) -> (size, mtime: i64, ok: bool) {
 	return fi.size, time.to_unix_nanoseconds(fi.modification_time), true
 }
 
-x_flush_page :: proc(dir: string, page: u32, sb: ^strings.Builder) -> bool {
-	if strings.builder_len(sb^) == 0 {
-		// (--llvm: every function of the page is in its .ll -- an older .c of it must go, or both define them)
-		if ir_mode {if p := fmt.tprintf("%s/page_%04x.c", dir, page); os.exists(p) {os.remove(p); return true}}
-		return false
+// ---- the translation on several threads ----
+// x_par_run(n, fn): fn(0) .. fn(n-1) on XRC_THREADS threads (default: every core), the calling thread one of them;
+// each job's temporary memory freed after it. What a job may touch: its own results, x_translate (whose shared state
+// is read-only by then, or per thread: rx_table_slots, x87_busy, x_bad_reg; locked: x_direct_used; atomic: the sync
+// counters), and its own page file.
+x_par_next, x_par_n: int
+x_par_fn: proc(i: int)
+
+x_par_threads :: proc() -> int {
+	if v := os.get_env("XRC_THREADS", context.temp_allocator); v != "" {
+		if n, ok := strconv.parse_int(v); ok && n >= 1 {return n}
 	}
+	return max(os.get_processor_core_count(), 1)
+}
+
+x_par_run :: proc(n: int, fn: proc(i: int)) {
+	x_par_next, x_par_n, x_par_fn = 0, n, fn
+	work :: proc() {
+		for {
+			i := intrinsics.atomic_add(&x_par_next, 1)
+			if i >= x_par_n {break}
+			x_par_fn(i)
+			free_all(context.temp_allocator)
+		}
+	}
+	nt := min(x_par_threads(), n)
+	x87_par = true
+	ts := make([dynamic]^thread.Thread, 0, max(nt, 1))
+	for _ in 1 ..< nt {append(&ts, thread.create_and_start(work))}
+	work()
+	for t in ts {thread.join(t); thread.destroy(t)}
+	delete(ts)
+	x87_par = false
+}
+
+// one page of the translation (x_par_run): its functions translated in address order, the page file written
+X_Fn_Rec :: struct {a: u32, ok: bool, nins: int, reason: string, inl, dv: int}
+X_Page_Job :: struct {page: u32, addrs: []u32, recs: []X_Fn_Rec, changed: bool, line: string}
+x_jobs: []X_Page_Job
+x_job_out: string
+x_flush_time: time.Duration
+
+x_page_job :: proc(i: int) {
+	j := &x_jobs[i]
+	pg := strings.builder_make()
+	for a, k in j.addrs {
+		xl := x_translate(a, funcs[a])
+		r := X_Fn_Rec{a = a, ok = xl.ok, nins = xl.nins}
+		if xl.ok {
+			r.inl, r.dv = xl.n_inlined, xl.n_devirt
+			if x_job_out != "" {x_append_function(&pg, &xl)}
+		} else {
+			r.reason = strings.clone(xl.reason)
+		}
+		j.recs[k] = r
+		strings.builder_destroy(&xl.b)
+		delete(xl.labels)
+		delete(xl.direct)
+		free_all(context.temp_allocator)
+	}
+	if x_job_out != "" {
+		tf := time.tick_now()
+		j.changed, j.line = x_flush_page_rec(x_job_out, j.page, &pg)
+		intrinsics.atomic_add(&x_flush_time, time.tick_since(tf))
+	}
+	strings.builder_destroy(&pg)
+}
+
+x_flush_page :: proc(dir: string, page: u32, sb: ^strings.Builder) -> bool {
 	os.make_directory(dir)
 	x_pages_load(dir)
+	changed, line := x_flush_page_rec(dir, page, sb)
+	strings.write_string(&x_pages_new, line)
+	delete(line)
+	return changed
+}
+
+// the page file, rewritten if its text changed (x_pages_load first: the manifest of the last run); its manifest line
+// (heap) is the caller's to record
+x_flush_page_rec :: proc(dir: string, page: u32, sb: ^strings.Builder) -> (bool, string) {
+	if strings.builder_len(sb^) == 0 {
+		// (--llvm: every function of the page is in its .ll -- an older .c of it must go, or both define them)
+		if ir_mode {if p := fmt.tprintf("%s/page_%04x.c", dir, page); os.exists(p) {os.remove(p); return true, ""}}
+		return false, ""
+	}
 	hdr := fmt.tprintf("/* page %04x0000: x86->C (xrc). Generated; do not edit. */\n#define XRC_PAGE 1\n#include \"xrc.h\"\n", page)
 	body := strings.to_string(sb^)
 	name := fmt.tprintf("page_%04x.c", page)
@@ -2387,9 +2596,9 @@ x_flush_page :: proc(dir: string, page: u32, sb: ^strings.Builder) -> bool {
 		if !same {_ = os.write_entire_file(path, transmute([]u8)text)}
 		if _, fm, okf := x_file_mtime(path); okf {mt = fm}
 	}
-	fmt.sbprintf(&x_pages_new, "%s %016x %d %d\n", name, h, size, mt)
+	line := fmt.aprintf("%s %016x %d %d\n", name, h, size, mt)
 	strings.builder_reset(sb)
-	return !same
+	return !same, line
 }
 
 // What the runtime needs from the exe besides its data sections, for loading the player's own copy (the retail exe:

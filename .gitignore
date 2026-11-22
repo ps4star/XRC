@@ -7,3 +7,6 @@
 
 # translation output
 /out/
+
+# the examples' build folders
+examples/*/build/

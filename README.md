@@ -285,6 +285,7 @@ Every variable is optional. The defaults are the settings the FINAL FANTASY XIII
 | Variable | Effect |
 |---|---|
 | `XRC_TIME=1` | Prints how long each phase took. |
+| `XRC_THREADS=N` | Translates on N threads (default: one per logical CPU). The output is the same for any N. |
 | `XRC_FL_VERIFY=1` | Writes a checking translation: every branch condition is computed both by the flag plan and the plain way, and the runtime reports `xrc: flag plan wrong at <addr>` if they ever differ. Inlining and devirtualization are off in this mode. |
 | `XRC_FL_DEBUG=1` | Prints flag-plan statistics, and why each flag reader that was not fused stayed generic. |
 | `XRC_INLINE_WHY=ADDR` | Prints why the function at ADDR is or is not inlined. |
@@ -708,6 +709,12 @@ compiler's vector extensions, so the same C runs on ARM64.
 
 **Interrupts and threads.** The generated code polls a flag at loop back-edges and calls, so the runtime can switch
 guest threads cooperatively (a global lock, the "GIL") without OS signals.
+
+**The translator itself** runs on every core: entry discovery, the callee-saved register scan, the x87 analysis, the
+inlining plan and the translation (a 64 KB page per job) are split across threads, and the results are put together
+in address order, so the output is byte-identical to a one-thread run (`XRC_THREADS=1`). The x87 analysis depends on
+the order of recursion, so the functions that reach a call cycle keep the one-thread order. FINAL FANTASY XIII (55k
+functions) translates in about 6 s on 12 threads, from 28 s on one.
 
 ## Optimizations
 

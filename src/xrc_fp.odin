@@ -21,6 +21,7 @@ import "core:fmt"
 import "core:os"
 import "core:mem/virtual"
 import "core:strings"
+import "core:time"
 import x86 "core:rexcode/isa/x86"
 
 X87_Eff :: struct {
@@ -42,7 +43,15 @@ X87_Flow :: struct {
 }
 
 x87_memo: map[u32]X87_Eff
+// x87_par: the translation threads run (x_par_run): x87_memo is complete (x87_precompute) and only read; a miss is
+// worked out but not kept. The functions being analyzed (recursion) are per thread.
+x87_par: bool
+@(thread_local)
 x87_busy: map[u32]bool
+@(thread_local)
+x87_arenas: [dynamic]^virtual.Arena
+@(thread_local)
+x87_depth: int
 x87_named: map[u32]X87_Eff
 x87_named_loaded: bool
 // CRT helpers taking x87 arguments that leave the values below them alone (MSVC keeps values live across them:
@@ -112,10 +121,18 @@ x87_effect :: proc(t: u32) -> X87_Eff {
 	x87_busy[t] = true
 	res := X87_Eff{}
 	{
-		// each callee is analyzed in its own arena, freed when done (the call tree would not fit in temp)
-		ar: virtual.Arena
-		if virtual.arena_init_growing(&ar) == nil {
-			al := virtual.arena_allocator(&ar)
+		// each callee is analyzed in its own arena, emptied when done (the call tree would not fit in temp): one per
+		// recursion depth, per thread, kept (a fresh one each time cost a virtual memory reserve and release, which
+		// Windows serializes across threads)
+		if x87_depth >= len(x87_arenas) {
+			na := new(virtual.Arena)
+			if virtual.arena_init_growing(na) != nil {free(na); na = nil}
+			append(&x87_arenas, na)
+		}
+		ar := x87_arenas[x87_depth]
+		if ar != nil {
+			x87_depth += 1
+			al := virtual.arena_allocator(ar)
 			old := context.temp_allocator
 			context.temp_allocator = al
 			ins, bad := rx_function(t, sz, al)
@@ -153,12 +170,132 @@ x87_effect :: proc(t: u32) -> X87_Eff {
 				}
 			}
 			context.temp_allocator = old
-			virtual.arena_destroy(&ar)
+			virtual.arena_free_all(ar)
+			x87_depth -= 1
 		}
 	}
 	delete_key(&x87_busy, t)
-	x87_memo[t] = res
+	if !x87_par {x87_memo[t] = res}
 	return res
+}
+
+// Every function's x87 effect, worked out before the translation threads start (they then only read x87_memo, and
+// the result does not depend on which thread got to a function first). The same results as asking for each in address
+// order on one thread: a function's effect depends on the order only through recursion (x87_busy cuts a cycle where it
+// was entered), so the functions that reach no cycle of the direct call graph are worked out first, on every core, a
+// level at a time from the leaves up (each with its callees' effects known); then the rest in address order, as before.
+x87_pre_fns: []u32
+x87_pre_edges: [][]u32
+x87_pre_res: []X87_Eff
+x87_pre_lvl: []u32
+
+x87_precompute :: proc() {
+	t0 := time.tick_now()
+	tm := os.get_env("XRC_TIME", context.temp_allocator) != ""
+	lapx :: proc(on: bool, t: ^time.Tick, what: string) {if on {fmt.eprintf("xrc x87 time: %-10s %.3f s\n", what, time.duration_seconds(time.tick_since(t^))); t^ = time.tick_now()}}
+	x87_load_named()
+	_ = x87_debug()
+	n := len(fstarts)
+	idx := make(map[u32]int, n)
+	defer delete(idx)
+	for a, k in fstarts {idx[a] = k}
+	// the edges: every function a branch, call or fall-through of its code reaches (more than x87_effect follows: an
+	// extra edge only keeps a function for the ordered pass)
+	x87_pre_fns = fstarts
+	x87_pre_edges = make([][]u32, n)
+	x_par_run(n, proc(k: int) {
+		a := x87_pre_fns[k]
+		if a in x87_named {return}
+		ins, _ := rx_function(a, funcs[a], context.temp_allocator)
+		e := make([dynamic]u32)
+		for &i in ins {
+			m := i.inst.mnemonic
+			if (m == .CALL || m == .JMP || rx_is_jcc(m)) && i.inst.operand_count > 0 && i.inst.ops[0].kind == .RELATIVE {
+				if t := rx_rel_target(&i, 0); t in funcs && !(t in x87_named) {append(&e, t)}
+			}
+			if !rx_is_branch_end(m) {if t := i.addr + i.len; t in funcs && !(t in x87_named) {append(&e, t)}}
+		}
+		x87_pre_edges[k] = e[:]
+	})
+	lapx(tm, &t0, "edges")
+	// strongly connected components (Tarjan, iterative): a node is "tainted" when it is in a cycle (a self-edge too) or
+	// reaches one; the others get a level, 1 + their callees' highest
+	low := make([]int, n); defer delete(low)
+	num := make([]int, n); defer delete(num)
+	on := make([]bool, n); defer delete(on)
+	taint := make([]bool, n); defer delete(taint)
+	lvl := make([]int, n); defer delete(lvl)
+	stk := make([dynamic]int); defer delete(stk)
+	Fr :: struct {v, e: int}
+	call := make([dynamic]Fr); defer delete(call)
+	cnt := 0
+	for s in 0 ..< n {
+		if num[s] != 0 {continue}
+		append(&call, Fr{s, 0})
+		for len(call) > 0 {
+			f := &call[len(call) - 1]
+			v := f.v
+			if f.e == 0 && num[v] == 0 {cnt += 1; num[v], low[v] = cnt, cnt; append(&stk, v); on[v] = true}
+			if f.e < len(x87_pre_edges[v]) {
+				w := idx[x87_pre_edges[v][f.e]]
+				f.e += 1
+				if num[w] == 0 {append(&call, Fr{w, 0}); continue}
+				if on[w] {low[v] = min(low[v], num[w])}
+				continue
+			}
+			// v done: its component, if it is the root
+			if low[v] == num[v] {
+				comp := make([dynamic]int, context.temp_allocator)
+				for {
+					w := pop(&stk)
+					on[w] = false
+					append(&comp, w)
+					if w == v {break}
+				}
+				t := len(comp) > 1
+				l := 0
+				for w in comp {
+					for x in x87_pre_edges[w] {
+						xi := idx[x]
+						if xi == w {t = true}
+						if taint[xi] {t = true}
+						l = max(l, lvl[xi] + 1)
+					}
+				}
+				for w in comp {taint[w] = t; lvl[w] = l}
+			}
+			pop(&call)
+			if len(call) > 0 {p := call[len(call) - 1].v; low[p] = min(low[p], low[v])}
+		}
+	}
+	lapx(tm, &t0, "tarjan")
+	free_all(context.temp_allocator)
+	// the untainted ones, a level at a time on every core (each one's callees already in x87_memo)
+	maxl := 0
+	for k in 0 ..< n {if !taint[k] {maxl = max(maxl, lvl[k])}}
+	if os.get_env("XRC_TIME", context.temp_allocator) != "" {
+		nt := 0
+		for k in 0 ..< n {if taint[k] {nt += 1}}
+		fmt.eprintf("xrc x87: %d functions, %d reach a call cycle, %d levels\n", n, nt, maxl + 1)
+	}
+	byl := make([][dynamic]u32, maxl + 1); defer {for &b in byl {delete(b)}; delete(byl)}
+	for k in 0 ..< n {if !taint[k] && !(fstarts[k] in x87_named) {append(&byl[lvl[k]], fstarts[k])}}
+	for l in 0 ..= maxl {
+		x87_pre_lvl = byl[l][:]
+		x87_pre_res = make([]X87_Eff, len(x87_pre_lvl))
+		x_par_run(len(x87_pre_lvl), proc(k: int) {x87_pre_res[k] = x87_effect(x87_pre_lvl[k])})
+		for a, k in x87_pre_lvl {x87_memo[a] = x87_pre_res[k]}
+		delete(x87_pre_res)
+	}
+	lapx(tm, &t0, "levels")
+	for e in x87_pre_edges {delete(e)}
+	delete(x87_pre_edges)
+	// the rest, in address order on this thread (as before: the cycles cut where they were entered)
+	for a in fstarts {
+		_ = x87_effect(a)
+		free_all(context.temp_allocator)
+	}
+	lapx(tm, &t0, "serial")
 }
 
 // depth effect of one x87 instruction at depth d (-1 + fail reason on underflow / unsupported)

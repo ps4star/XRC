@@ -119,20 +119,24 @@ x_sync_kept :: proc(t: string, at, end: int) -> u8 {
 
 X_Sync_Kind :: enum u8 {Plain, Opaque, Call, Ret}
 
-x_sync_plan :: proc(xl: ^Xlat, ins: []Rx_Ins, spans: [][2]int, entry: u32) {
-	if x_sync_on < 0 {x_sync_on = os.get_env("XRC_SYNC_TRIM", context.temp_allocator) == "0" ? 0 : 1}
-	if x_sync_on == 0 {return}
+// (the switches, looked up once: before the translation threads start)
+x_sync_init :: proc() {
+	if x_sync_on >= 0 {return}
+	x_sync_on = os.get_env("XRC_SYNC_TRIM", context.temp_allocator) == "0" ? 0 : 1
 	// XRC_SYNC_RANGE=lo-hi (hex): only the functions starting there (bisecting a wrong trim)
-	if x_sync_lo == 0 && x_sync_hi == 0 {
-		x_sync_hi = 0xffffffff
-		if v := os.get_env("XRC_SYNC_RANGE", context.temp_allocator); v != "" {
-			if d := strings.index_byte(v, '-'); d > 0 {
-				lo, ok1 := strconv.parse_uint(v[:d], 16)
-				hi, ok2 := strconv.parse_uint(v[d + 1:], 16)
-				if ok1 && ok2 {x_sync_lo, x_sync_hi = u32(lo), u32(hi)}
-			}
+	x_sync_hi = 0xffffffff
+	if v := os.get_env("XRC_SYNC_RANGE", context.temp_allocator); v != "" {
+		if d := strings.index_byte(v, '-'); d > 0 {
+			lo, ok1 := strconv.parse_uint(v[:d], 16)
+			hi, ok2 := strconv.parse_uint(v[d + 1:], 16)
+			if ok1 && ok2 {x_sync_lo, x_sync_hi = u32(lo), u32(hi)}
 		}
 	}
+}
+
+x_sync_plan :: proc(xl: ^Xlat, ins: []Rx_Ins, spans: [][2]int, entry: u32) {
+	x_sync_init()
+	if x_sync_on == 0 {return}
 	if entry < x_sync_lo || entry > x_sync_hi {return}
 	n := len(ins)
 	if n == 0 || len(spans) != n {return}
@@ -263,12 +267,12 @@ x_sync_plan :: proc(xl: ^Xlat, ins: []Rx_Ins, spans: [][2]int, entry: u32) {
 		t := buf[spans[k][0]:spans[k][1]]
 		if kind[k] != .Call && kind[k] != .Ret {strings.write_string(&nb, t); continue}
 		f := kind[k] == .Call ? fm[k] : X_SYNC_ALL
-		x_sync_sites += 1
-		x_sync_st_all += 7
-		x_sync_st_saved += 7 - int(intrinsics.count_ones(sm[k] & X_SYNC_ALL))
+		intrinsics.atomic_add(&x_sync_sites, 1)
+		intrinsics.atomic_add(&x_sync_st_all, 7)
+		intrinsics.atomic_add(&x_sync_st_saved, 7 - int(intrinsics.count_ones(sm[k] & X_SYNC_ALL)))
 		if kind[k] == .Call {
-			x_sync_ld_all += int(intrinsics.count_ones(X_SYNC_ALL &~ kept[k]))
-			x_sync_ld_saved += int(intrinsics.count_ones(X_SYNC_ALL &~ kept[k] &~ f))
+			intrinsics.atomic_add(&x_sync_ld_all, int(intrinsics.count_ones(X_SYNC_ALL &~ kept[k])))
+			intrinsics.atomic_add(&x_sync_ld_saved, int(intrinsics.count_ones(X_SYNC_ALL &~ kept[k] &~ f)))
 		}
 		strings.write_string(&nb, t[:mat[k]])
 		fmt.sbprintf(&nb, "{{ enum {{ x_sm_ = 0x%x, x_fm_ = 0x%x }}; ", sm[k], f)

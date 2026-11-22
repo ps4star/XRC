@@ -473,11 +473,14 @@ rx_function :: proc(a: u32, size: u32, alloc := context.allocator) -> (out: [dyn
 //   rx_byte_tables   address of the movzx that reads the byte index table -> (table address, entries)
 //                                                                              -> switch (_ea) { case at: v = byte }
 Rx_Byte_Table :: struct {at, n: u32}
+// (per thread: each translation thread fills its own while translating a function, and reads only those)
+@(thread_local)
 rx_table_slots: map[u32][dynamic][2]u32
+@(thread_local)
 rx_byte_tables: map[u32]Rx_Byte_Table
-@(private = "file")
+@(private = "file", thread_local)
 rx_cur_slots: ^[dynamic][2]u32
-@(private = "file")
+@(private = "file", thread_local)
 rx_cur_bias: u32 // (a GOT-relative table: the GOT address, added to every entry)
 
 // a jmp that may be a switch: through memory, or (PIC code: the executable has a GOT) through a register
