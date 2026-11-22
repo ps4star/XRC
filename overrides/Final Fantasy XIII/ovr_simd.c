@@ -1764,103 +1764,6 @@ void XRC_CC xo_00f32f40(XCtx *c) {
 	xrc_stdcall_ret(c, 3);
 }
 
-/* 00f330f0: thiscall (a1, reg, data), ret 0xc: the pixel shader's twin of 00f32f40 -- reg 0: nothing; else
- * dev->SetPixelShaderConstantF(*(*(*0x28670bc + 8) + reg * 8 - 4), data, 1). push ebp; [ebp-8] = ecx, [ebp-4] = the
- * table object (eax at the zero return); at the call eax = dev, ecx = the method, edx = the vtable */
-void XRC_CC xo_00f330f0(XCtx *c) {
-	static XIc ic = {0xffffffffu, 0, 0};
-	u32 sp = c->esp, reg = M32(sp + 8), a3 = M32(sp + 12), bp = sp - 4, t = M32(0x028670bcu);
-	W_HEAD(00f330f0)
-	M32(bp) = c->ebp; M32(bp - 8) = c->ecx; M32(bp - 4) = t;
-	if (!reg) {
-		c->eax = t;
-		c->eip = M32(sp); c->esp = sp + 16;
-		return;
-	}
-	{
-		W_DEV;
-		M32(bp - 12) = 1; M32(bp - 16) = a3; M32(bp - 20) = M32(M32(t + 8) + reg * 8u - 4u); M32(bp - 24) = d;
-		c->eax = d; c->ecx = M32(vt + 0x1b4); c->edx = vt; c->ebp = bp;
-		w_call(c, bp - 28, c->ecx, &ic, 0x00f3313bu);
-	}
-	c->esp = c->ebp; c->ebp = M32(c->esp); c->esp += 4; /* (mov esp, ebp; pop ebp) */
-	xrc_stdcall_ret(c, 3);
-}
-
-/* 00f32d20: thiscall (a1, blk), ret 8: the shader's constant slots -- for each slot i < (short)this->+0xc whose
- * register (u16 this->+8[i]) is neither 0 nor 0xffff, this->vtbl[2](a1, reg, blk + blk->+0xc[i] + 0x10) (00f330f0 /
- * 00f32f40: the constant set). A count other than blk->+8 asserts first: the translation. push ebp, esp = ebp - 0x24;
- * locals as the original's; at each call ecx = this, eax = the method, edx = the vtable; at the end eax = the count,
- * ecx = i, edx = this */
-void XRC_CC xo_00f32d20(XCtx *c) {
-	static XIc ic = {0xffffffffu, 0, 0};
-	u32 sp = c->esp, a1 = M32(sp + 4), blk = M32(sp + 8), bp = sp - 4, th = c->ecx, i;
-	int n;
-	W_HEAD(00f32d20)
-	n = (int)(s16)M16(th + 0xc);
-	if ((u32)n != M32(blk + 8)) { orig(c); return; }
-	M32(bp) = c->ebp; M32(bp - 0x20) = th; M32(bp - 4) = blk; M32(bp - 0x18) = (u32)n;
-	M8(bp - 5) = 0; M8(bp - 0x24) = 0;
-	c->ecx = th & ~0xffu;
-	for (i = 0; (int)i < (int)(s16)M16(th + 0xc); i++) {
-		u32 r = M16(M32(th + 8) + i * 2u), tab, e, vt;
-		M32(bp - 0xc) = i;
-		if (r == 0xffffu || !r) continue;
-		tab = blk + M32(blk + 0xc); e = blk + M32(tab + i * 4u);
-		M32(bp - 0x1c) = tab; M32(bp - 0x10) = e;
-		M32(bp - 0x28) = e + 0x10u; M32(bp - 0x2c) = r; M32(bp - 0x30) = a1;
-		vt = M32(th);
-		c->eax = M32(vt + 8); c->ecx = th; c->edx = vt; c->ebp = bp;
-		w_call(c, bp - 0x34, c->eax, &ic, 0x00f32e2du);
-		th = M32(bp - 0x20); blk = M32(bp - 4); a1 = M32(bp + 8); /* (as the original rereads them) */
-	}
-	M32(bp - 0xc) = i;
-	c->eax = (u32)(int)(s16)M16(th + 0xc); c->edx = th; if (i) c->ecx = i;
-	c->esp = bp; c->ebp = M32(bp);
-	c->eip = M32(sp); c->esp = sp + 12;
-}
-
-/* 00efec60: thiscall (key, out_entry, out_box, out_index), ret 0x10: of the entries of this->+4 .. this->+8 (8 bytes
- * each, the object first), the one whose descriptor (o->+0x14->vtbl[1](), + 0x20) matches key (00eff380(d, key,
- * 0x20): d[0] & key[0] == key[0] and (key[1] | 0x20) & d[1] == key[1] -- its population-count branch is dead, `xor
- * edx, edx; je`) with the least d[3]; out_entry = its object, out_box = its 16 bytes, out_index = its index. vtbl[1]
- * is 00b8cd40 (return this) natively, else called. At the end eax = the last vtbl[1]'s result, ecx its object, edx
- * the vtable. push ebp, esp = ebp - 0x80 */
-static inline u32 ef_get(XCtx *c, u32 o, u32 bp, XIc *ic, u32 ra) {
-	u32 ob = M32(o + 0x14), vt = M32(ob), m = M32(vt + 4);
-	c->ecx = ob; c->edx = vt;
-	if (m == 0x00b8cd40u) { M32(bp - 0x88) = c->ebp; M32(bp - 0x8c) = ob; c->eax = ob; return ob; }
-	c->eax = m; c->ebp = bp;
-	w_call(c, bp - 0x84, m, ic, ra);
-	c->esp = bp - 0x80;
-	return c->eax;
-}
-void XRC_CC xo_00efec60(XCtx *c) {
-	static XIc ic[3] = {{0xffffffffu, 0, 0}, {0xffffffffu, 0, 0}, {0xffffffffu, 0, 0}};
-	u32 sp = c->esp, key = M32(sp + 4), a2 = M32(sp + 8), a3 = M32(sp + 12), a4 = M32(sp + 16), bp = sp - 4, th = c->ecx;
-	u32 n, i, best = 0, k0, k1, d;
-	int lo = 0x7fffffff;
-	W_HEAD(00efec60)
-	M32(bp) = c->ebp; M32(bp - 0x70) = th; M32(bp - 0x10) = 0x20;
-	c->ebp = bp; c->esp = bp - 0x80;
-	k0 = M32(key); k1 = M32(key + 4) | 0x20u;
-	n = M32(th + 4) ? (u32)((s32)(M32(th + 8) - M32(th + 4)) >> 3) : 0;
-	for (i = 0; i < n; i++) {
-		d = ef_get(c, M32(M32(th + 4) + i * 8u), bp, &ic[0], 0x00efecf8u) + 0x20u;
-		if ((M32(d) & k0) == k0 && (k1 & M32(d + 4)) == M32(key + 4) && lo > (s32)M32(d + 0xc)) { best = i; lo = (s32)M32(d + 0xc); }
-	}
-	M32(bp - 0x14) = i; M32(bp - 0xc) = best; M32(bp - 4) = (u32)lo; M32(bp - 8) = n;
-	if (a2) M32(a2) = M32(M32(th + 4) + best * 8u);
-	if (a3) {
-		d = ef_get(c, M32(M32(th + 4) + best * 8u), bp, &ic[1], 0x00efed8cu) + 0x20u;
-		M32(a3) = M32(d); M32(a3 + 4) = M32(d + 4); M32(a3 + 8) = M32(d + 8); M32(a3 + 12) = M32(d + 12);
-	}
-	if (a4) M32(a4) = best;
-	ef_get(c, M32(M32(th + 4) + best * 8u), bp, &ic[2], 0x00efededu);
-	c->ebp = M32(bp);
-	c->eip = M32(sp); c->esp = sp + 20;
-}
-
 /* 00eac520 / 00eac590: cdecl (sampler, a, b, c[, lod]): dev->SetSamplerState(sampler, s0_ + k, tab_[arg k]) for
  * k = 0..2 (the address modes / the filters); 00eac590 also SetSamplerState(sampler, 8 -- MIPMAPLODBIAS --,
  * (float)(char)lod * *0x10c7fb0), the float stored over its argument (and left in xmm0's low lane). push esi (esi =
@@ -2145,9 +2048,6 @@ const XrcManual xrc_manual_simd[] = {
 	{0x00eaf1b0u, xo_00eaf1b0, "Render EndScene (fast)"},
 	{0x00c27cf0u, xo_00c27cf0, "SetPixelShaderConstantF(i, reg) wrapper (fast)"},
 	{0x00f32f40u, xo_00f32f40, "SetVertexShaderConstantF(tab, reg, data) wrapper (fast)"},
-	{0x00f330f0u, xo_00f330f0, "SetPixelShaderConstantF(reg, data) wrapper (fast)"},
-	{0x00f32d20u, xo_00f32d20, "shader constant slots loop (fast)"},
-	{0x00efec60u, xo_00efec60, "least-cost matching entry search (fast)"},
 	{0x00eac520u, xo_00eac520, "Render sampler address modes (fast)"},
 	{0x00eac590u, xo_00eac590, "Render sampler filters + LOD bias (fast)"},
 	{0x00eac780u, xo_00eac780, "Render render states (3 from tables) (fast)"},
