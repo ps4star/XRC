@@ -10,6 +10,8 @@ package xrc
 //   x87_helper ADDR TAKES GIVES   a function with an x87 interface the flow analysis cannot derive (its x87 paths are
 //                                 dynamic, e.g. the CRT's __CIsin): how many x87 values it takes from the stack and how
 //                                 many it leaves there
+//   patched ADDR [LEN]            read-only data the runtime writes (LEN bytes, default 4): not folded into the
+//                                 code as a constant (x_rdata_fold)
 //
 // Without the file (or without --override) there are none of these: every call is a plain call.
 
@@ -42,6 +44,13 @@ config_load :: proc(path: string) -> bool {
 			g, okg := strconv.parse_uint(f[3], 10)
 			if !oka || !okt || !okg {bad = true; break}
 			append(&cfg_x87, [3]u32{a, u32(t), u32(g)})
+		case "patched":
+			if len(f) != 2 && len(f) != 3 {bad = true; break}
+			a, oka := hex_u32(f[1])
+			l, okl := uint(4), true
+			if len(f) == 3 {l, okl = strconv.parse_uint(f[2], 10)}
+			if !oka || !okl {bad = true; break}
+			append(&exe.no_fold, [2]u32{a, a + u32(l)})
 		case:
 			bad = true
 		}

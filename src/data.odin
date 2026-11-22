@@ -72,6 +72,7 @@ Exe :: struct {
 	text_lo:  u32,
 	text_hi:  u32,
 	writable: [dynamic][2]u32,
+	no_fold:  [dynamic][2]u32, // read-only data never taken as constants: the import tables, xrc.cfg's `patched`
 	entry:    u32,
 	got:      u32,          // ELF / Mach-O PIC code's table base (_GLOBAL_OFFSET_TABLE_), for GOT-relative switch tables
 	syms:     map[u32]u32,  // functions from the file's own symbols (and its import stubs): address -> size
@@ -139,6 +140,30 @@ load_pe :: proc(d: []u8) -> bool {
 		exe.hi = max(exe.hi, s.base + max(s.vsize, s.rsize))
 	}
 	exe.hi = (exe.hi + PAGE - 1) & ~u32(PAGE - 1)
+	// the import tables (the loader -- the runtime -- writes the IAT): never folded as constants (x_rdata_fold). The
+	// data directories' imports (1), IAT (12) and delayed imports (13), and each import descriptor's thunk array
+	ndir := int(u32le(d, pe + 24 + 92))
+	for k in ([3]int{1, 12, 13}) {
+		if k >= ndir {continue}
+		rva, size := u32le(d, pe + 24 + 96 + 8 * k), u32le(d, pe + 24 + 96 + 8 * k + 4)
+		if rva != 0 && size != 0 {append(&exe.no_fold, [2]u32{base + rva, base + rva + size})}
+	}
+	if ndir > 1 {
+		if irva := u32le(d, pe + 24 + 96 + 8); irva != 0 {
+			for desc := base + irva; ; desc += 20 {
+				b := exe_read(desc, 20)
+				if len(b) < 20 || u32le(b, 12) == 0 {break}
+				iat := base + u32le(b, 16)
+				n := u32(0)
+				for {
+					t := exe_read(iat + 4 * n, 4)
+					if len(t) < 4 || u32le(t, 0) == 0 {break}
+					n += 1
+				}
+				append(&exe.no_fold, [2]u32{iat, iat + 4 * n + 4})
+			}
+		}
+	}
 	return true
 }
 

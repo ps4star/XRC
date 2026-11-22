@@ -623,6 +623,7 @@ x_emit :: proc(xl: ^Xlat, ins: ^Rx_Ins) {
 	// an address temp if any operand is memory
 	ea, have_ea := "", false
 	flat_start := -1
+	rd_start, rd_addr := -1, u32(0) // (an absolute address: x_rdata_fold)
 	mem_i := -1
 	for i in 0 ..< n {
 		if ops[i].kind == .MEMORY {mem_i = i; break}
@@ -640,10 +641,12 @@ x_emit :: proc(xl: ^Xlat, ins: ^Rx_Ins) {
 			flat_start = len(xl.b.buf)
 			pf(xl, d < 0 ? "    { XEA_T _ea = (XEA_T)(%s) - 0x%xu;" : "    { XEA_T _ea = (XEA_T)(%s) + 0x%xu;", r, d < 0 ? u32(-d) : u32(d))
 		} else {
+			if x_rdata_on && mm.segment == 0 && !x86.mem_has_base(mm) && !x86.mem_has_index(mm) {rd_start, rd_addr = len(xl.b.buf), u32(mm.disp)}
 			pf(xl, "    { u32 _ea = (%s);", a)
 		}
 	}
 	defer if have_ea {
+		if rd_start >= 0 && !xl.dry {x_rdata_fold(xl, rd_start, rd_addr)}
 		if flat_start >= 0 && !xl.dry {x_flat_rewrite(xl, flat_start)}
 		pf(xl, "    }")
 	}
@@ -2104,6 +2107,7 @@ cmd_xrc :: proc(args: []string) -> int {
 	x87_precompute()
 	x_sync_init()
 	x_flat_on = !ir_mode && os.get_env("XRC_FLAT_EA", context.temp_allocator) != "0"
+	x_rdata_on = !ir_mode && os.get_env("XRC_RDATA_FOLD", context.temp_allocator) != "0"
 	_, _, _ = x_fl_disabled(), x_fl_verify(), x_fl_debug()
 	lap(x_timing, &t_last, "x87 effects")
 	if all {x_inline_plan(addrs[:], funcs); x_devirt_load()}

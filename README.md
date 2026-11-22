@@ -272,6 +272,7 @@ Every variable is optional. The defaults are the settings the FINAL FANTASY XIII
 | `XRC_FLAGS_OLD=1` | off | Turns flag liveness and compare-branch fusion off: every flag is computed lazily, as in xrc's first output. For comparison. |
 | `XRC_SYNC_TRIM=0` | on | Turns register-sync trimming off, so every call and return saves and reloads every register. |
 | `XRC_FLAT_EA=0` | on | Turns flat addressing off. When on, `[reg + small displacement]` addresses are 64-bit sums (`MX*` accesses) and `esp`/`ebp` live in 64-bit C variables, so the host compiler folds each displacement into one instruction instead of a separate 32-bit add (FF13: code 5% smaller, main thread 3-4% faster). Only addresses that would wrap past 0 or 4 GB differ, and none of those is valid. |
+| `XRC_RDATA_FOLD=0` | on | Turns read-only constant folding off. When on, a read of a fixed address in a section that is neither writable nor executable (a float constant, a mask, a string's bytes) becomes the value itself (`M32(_ea)` -> `0x3f800000u`), so the host compiler can fold what is computed from it. The import tables and `xrc.cfg`'s `patched` entries are never folded; an instruction that also writes the address is left as it was. FF13: 39 467 of 72 119 such reads, binary 0.3 MB smaller; main thread battle -1.8%, crystarium -0.8% (alternating A/B, 4 runs each). |
 | `XRC_STACK=0` | on | Turns the stack-balance analysis off. When on, a data flow over each function finds the `N` of a `ret N` that every way out of it returns with (FF13: 51076 of 55770 functions); a direct call to such a function then sets `esp` to its value before the call `+ N` instead of reading it back. `XRC_STACK_VERIFY=1` checks every such call at run time (`xrc_stack_bad`). |
 | `XRC_LAYOUT=FILE` / `XRC_LAYOUT=0` | `data/layout_hot.txt` | Code layout for the instruction cache. The hot functions of a profile (lines `address weight`, any positive weights) move out of their address pages into hot pages of their own (`page_10000.c`, `page_10001.c`, ...), clustered by their direct calls (C3) and ordered by density. Compilers keep a file's functions in order and the partial link keeps the objects' order, so the hot code is contiguous on every target. FF13 (2946 functions, 1.8 MB of guest code): field -3.5%, battle -6.5%, crystarium -8% main-thread time. `0` turns it off. |
 | `XRC_ABI_KEEP=0` | on | Turns the callee-saved register plan off: every direct call reloads ebx, esi, edi and ebp afterwards. |
@@ -354,6 +355,7 @@ One entry per line, `#` for comments, addresses in hex:
 | `frame_prolog ADDR` | A compiler frame-setup helper such as MSVC's `__SEH_prolog4` or `__EH_prolog3`. It pushes ebx, esi, edi and the caller's ebp on behalf of the function that calls it, which then writes them freely. xrc treats the call as that function's own prologue. |
 | `frame_epilog ADDR` | Its counterpart, such as `__SEH_epilog4` or `__EH_epilog3`. It restores all four. |
 | `x87_helper ADDR TAKES GIVES` | A function whose x87 interface the stack analysis cannot derive, because its x87 paths are dynamic (the C runtime's `__CIsin` and similar). It takes TAKES values from the x87 stack and leaves GIVES there. |
+| `patched ADDR [LEN]` | Read-only data (LEN bytes, default 4) that the runtime changes at run time, such as a constant it patches for a feature. Its reads are not folded into the code as constants (`XRC_RDATA_FOLD`). |
 
 The file is optional. Without it, these calls are plain calls: correct, as long as the binary has no such helpers.
 
@@ -813,6 +815,7 @@ xrc/
 │   ├── xrc.odin              the translator: functions, calls, the ABI plan, inlining, devirtualization,
 │   │                         stack slots, pages, the dispatch table
 │   ├── xrc_flags.odin        flag liveness and compare-branch fusion
+│   ├── xrc_rdfold.odin       read-only constant folding
 │   ├── xrc_sync.odin         register-sync trimming
 │   ├── xrc_fp.odin           x87 and SSE
 │   └── xrc_ir.odin           the LLVM IR backend
