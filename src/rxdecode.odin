@@ -35,6 +35,7 @@ Rx_Ins :: struct {
 	xr:     u8,     // xop: ModR/M reg field
 	xrm:    u8,     // xop: ModR/M rm field (register forms)
 	xmem:   bool,   // xop: the rm operand is memory (inst.ops[0], size meaningless)
+	ximm:   u8,     // xop SHIFT_IMM: the count
 }
 
 Rx_Xop :: enum u8 {
@@ -51,6 +52,8 @@ Rx_Xop :: enum u8 {
 	MMXOP,     // 0F <opc2> /r  mm, mm/m64: pand pandn por pxor paddd psubd paddq psubq (opc2 says which)
 	MOVD_LD,   // 0F 6E /r  mm, r/m32
 	MOVD_ST,   // 0F 7E /r  r/m32, mm
+	SHIFT_IMM, // 0F 71 / 72 / 73 /r ib  mm, imm8 (psrlw psraw psllw psrld psrad pslld psrlq psllq); with 66 only 73 /3 /7 (xmm:
+	           // psrldq pslldq, which rexcode has no rows for). The count is in ximm, the register in xrm.
 	UD,        // an invalid encoding (ud2, FE /2-7, FF /7, FF /3 or /5 with a register): raises #UD
 }
 
@@ -160,6 +163,13 @@ rx_slow: int // XRC_RX_SLOW: 0 not looked up yet, 1 rx_decode_one, 2 x86.decode
 rx_decode_bytes :: proc(code: []u8, addr: u32) -> (Rx_Ins, bool) {
 	if len(code) == 0 {return {}, false}
 	if r, ok, hit := rx_decode_subst(code, addr); hit {return r, ok}
+	// lock xchg r/m, r (F0 86 / 87): rexcode drops the memory operand with the lock prefix. xchg with memory is atomic
+	// without it, so the prefix changes nothing: decode the rest, one byte longer
+	if len(code) >= 3 && code[0] == 0xf0 && (code[1] == 0x86 || code[1] == 0x87) {
+		r, ok := rx_decode_bytes(code[1:], addr)
+		if ok {r.len += 1; r.inst.length += 1}
+		return r, ok
+	}
 	if rx_slow == 0 {rx_slow = os.get_env("XRC_RX_SLOW", context.temp_allocator) != "" ? 2 : 1}
 	r: Rx_Ins
 	if rx_slow == 1 {
@@ -269,6 +279,20 @@ rx_decode_subst :: proc(code: []u8, addr: u32) -> (r: Rx_Ins, ok: bool, hit: boo
 	case 0x6e: if !sse_pfx {x = .MOVD_LD}
 	case 0x7e: if !sse_pfx {x = .MOVD_ST}
 	case 0xdb, 0xdf, 0xeb, 0xef, 0xfe, 0xfa, 0xd4, 0xfb: if !sse_pfx {x = .MMXOP}
+	case 0x71, 0x72, 0x73:
+		// (a register form with its count byte; the 66 forms other than psrldq / pslldq are rexcode's)
+		if m >= 0xc0 && p + 3 < len(code) && (!sse_pfx || (code[p - 1] == 0x66 && o2 == 0x73 && (reg == 3 || reg == 7))) {
+			if _, ok2 := simd_shift_imm_assigns(o2, reg, 0, sse_pfx ? 16 : 8); ok2 {
+				hit = true
+				r = Rx_Ins{addr = addr, len = u32(p + 4), sti = -1, inst = {mnemonic = .NOP, length = u8(p + 4)}, p66 = sse_pfx}
+				r.opc, r.opc2, r.modrm = 0x0f, o2, m
+				r.xop, r.xr, r.xrm, r.ximm = .SHIFT_IMM, reg, m & 7, code[p + 3]
+				return r, true, true
+			}
+		}
+	case:
+		// the other MMX integer ops (unpacks, packs, compares, saturating and averaging arithmetic, multiplies, shifts by a register)
+		if !sse_pfx {if _, ok2 := simd_int_assigns(o2, 8); ok2 {x = .MMXOP}}
 	}
 	if x == .None {return}
 	hit = true
@@ -345,6 +369,7 @@ rx_mn :: proc(i: ^Rx_Ins) -> string {
 	case .MOVQ_LD, .MOVQ_ST: return "movq"
 	case .MOVD_LD, .MOVD_ST: return "movd"
 	case .MMXOP: return "mmx"
+	case .SHIFT_IMM: return "psxx imm"
 	case .EMMS: return "emms"
 	case .UD: return "(invalid)"
 	case .None:

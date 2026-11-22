@@ -1,0 +1,5 @@
+# Functions of bink2w32.dll that are not translated but covered (read by xrc --override=bink2w32; ovr_bink.c here is
+# copied with the pages to <out>/overrides/ and compiled with the runtime). Kinds: see the FINAL FANTASY XIII folder's.
+# address	kind	name / why
+100033c0	manual	ftol64 (st0 -> edx:eax, truncated)
+100033f0	manual	ftol64 (its jmp thunk)

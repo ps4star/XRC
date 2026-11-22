@@ -1005,5 +1005,153 @@ sse_emit :: proc(xl: ^Xlat, ins: ^Rx_Ins, ops: []x86.Operand, ea: string, have_e
 		if ops[1].kind != .IMMEDIATE {pf(xl, "    }")}
 		return true
 	}
+	// the other 66 0F integer ops (packs, unpacks, saturating and averaging arithmetic, multiplies: simd_int_assigns) and SSSE3
+	// pmaddubsw / pshufb
+	if n >= 2 && ins.p66 && ins.opc == 0x0f {
+		if as, ok := simd_int_assigns(ins.opc2, 16); ok {xl_x(xl); return sse_shuffle(xl, ops, ea, 16, as[:])}
+	}
+	if n >= 2 {
+		if as, ok := simd_ssse3_assigns(m, 16); ok {xl_x(xl); return sse_shuffle(xl, ops, ea, 16, as[:])}
+	}
 	return false
+}
+
+// ---- the 0F-map integer SIMD ops, one table for the SSE2 (66 0F xx, xmm: 16 bytes) and MMX (0F xx, mm: 8 bytes)
+// forms: the lane assignments ("rt[k] = expr" over _d, the destination, and _s, the source, as sse_shuffle takes them)
+// of the op with second opcode byte opc2 on `bytes`-byte registers. ok=false for an opc2 not in the table.
+// Saturation: xsat(v, lo, hi). The shifts by a register count read _s.q[0] (counts past the lane width give 0, or
+// the sign for the arithmetic shifts).
+simd_int_assigns :: proc(opc2: u8, bytes: int) -> (as: [dynamic]string, ok: bool) {
+	as = make([dynamic]string, context.temp_allocator)
+	nb, nw, nd, nq := bytes, bytes / 2, bytes / 4, bytes / 8
+	add :: proc(as: ^[dynamic]string, f: string, args: ..any) {append(as, fmt.tprintf(f, ..args))}
+	lanes :: proc(as: ^[dynamic]string, n: int, view, tmpl: string) {
+		for i in 0 ..< n {
+			e, _ := strings.replace_all(tmpl, "$a", fmt.tprintf("_d.%s[%d]", view, i), context.temp_allocator)
+			e, _ = strings.replace_all(e, "$b", fmt.tprintf("_s.%s[%d]", view, i), context.temp_allocator)
+			append(as, fmt.tprintf("%s[%d] = %s", view, i, e))
+		}
+	}
+	// interleave the low (hi=false) or high halves of _d and _s, lanes of `view` (n of them in the register)
+	unpack :: proc(as: ^[dynamic]string, n: int, view: string, hi: bool) {
+		b := hi ? n / 2 : 0
+		for i in 0 ..< n / 2 {
+			append(as, fmt.tprintf("%s[%d] = _d.%s[%d]", view, 2 * i, view, b + i), fmt.tprintf("%s[%d] = _s.%s[%d]", view, 2 * i + 1, view, b + i))
+		}
+	}
+	// narrow with saturation: n source lanes (of sview) from each of _d and _s into 2n lanes of rview
+	pack :: proc(as: ^[dynamic]string, n: int, rview, rcast, sview: string, lo, hi: int) {
+		for i in 0 ..< n {
+			append(as, fmt.tprintf("%s[%d] = (%s)xsat(_d.%s[%d], %d, %d)", rview, i, rcast, sview, i, lo, hi))
+		}
+		for i in 0 ..< n {
+			append(as, fmt.tprintf("%s[%d] = (%s)xsat(_s.%s[%d], %d, %d)", rview, n + i, rcast, sview, i, lo, hi))
+		}
+	}
+	switch opc2 {
+	case 0x60: unpack(&as, nb, "b", false)
+	case 0x61: unpack(&as, nw, "w", false)
+	case 0x62: unpack(&as, nd, "u", false)
+	case 0x68: unpack(&as, nb, "b", true)
+	case 0x69: unpack(&as, nw, "w", true)
+	case 0x6a: unpack(&as, nd, "u", true)
+	case 0x63: pack(&as, nw, "b", "u8", "sw", -128, 127)    // packsswb
+	case 0x67: pack(&as, nw, "b", "u8", "sw", 0, 255)       // packuswb
+	case 0x6b: pack(&as, nd, "w", "u16", "s", -32768, 32767) // packssdw
+	case 0x64: lanes(&as, nb, "b", "(s8)$a > (s8)$b ? 0xffu : 0u")
+	case 0x65: for i in 0 ..< nw {add(&as, "w[%d] = _d.sw[%d] > _s.sw[%d] ? 0xffffu : 0u", i, i, i)}
+	case 0x66: for i in 0 ..< nd {add(&as, "u[%d] = _d.s[%d] > _s.s[%d] ? 0xffffffffu : 0u", i, i, i)}
+	case 0x74: lanes(&as, nb, "b", "$a == $b ? 0xffu : 0u")
+	case 0x75: lanes(&as, nw, "w", "$a == $b ? 0xffffu : 0u")
+	case 0x76: lanes(&as, nd, "u", "$a == $b ? 0xffffffffu : 0u")
+	case 0xd1: lanes(&as, nw, "w", "(u16)(_s.q[0] > 15 ? 0 : (u32)$a >> _s.q[0])")
+	case 0xd2: lanes(&as, nd, "u", "_s.q[0] > 31 ? 0 : $a >> _s.q[0]")
+	case 0xd3: lanes(&as, nq, "q", "xsh64r($a, _s.q[0] > 63 ? 64u : (u32)_s.q[0])")
+	case 0xe1: for i in 0 ..< nw {add(&as, "sw[%d] = (s16)((s32)_d.sw[%d] >> (_s.q[0] > 15 ? 15 : (u32)_s.q[0]))", i, i)}
+	case 0xe2: for i in 0 ..< nd {add(&as, "s[%d] = _d.s[%d] >> (_s.q[0] > 31 ? 31 : (u32)_s.q[0])", i, i)}
+	case 0xf1: lanes(&as, nw, "w", "(u16)(_s.q[0] > 15 ? 0 : (u32)$a << _s.q[0])")
+	case 0xf2: lanes(&as, nd, "u", "_s.q[0] > 31 ? 0 : $a << _s.q[0]")
+	case 0xf3: lanes(&as, nq, "q", "xsh64l($a, _s.q[0] > 63 ? 64u : (u32)_s.q[0])")
+	case 0xd4: lanes(&as, nq, "q", "$a + $b")
+	case 0xfb: lanes(&as, nq, "q", "$a - $b")
+	case 0xd5: lanes(&as, nw, "w", "(u16)((u32)$a * $b)")
+	case 0xd8: lanes(&as, nb, "b", "(u8)($a > $b ? $a - $b : 0)")
+	case 0xd9: lanes(&as, nw, "w", "(u16)($a > $b ? $a - $b : 0)")
+	case 0xda: lanes(&as, nb, "b", "$a < $b ? $a : $b")
+	case 0xde: lanes(&as, nb, "b", "$a > $b ? $a : $b")
+	case 0xdb: lanes(&as, nq, "q", "$a & $b")
+	case 0xdf: lanes(&as, nq, "q", "~$a & $b")
+	case 0xeb: lanes(&as, nq, "q", "$a | $b")
+	case 0xef: lanes(&as, nq, "q", "$a ^ $b")
+	case 0xdc: lanes(&as, nb, "b", "(u8)xsat((s32)$a + $b, 0, 255)")
+	case 0xdd: lanes(&as, nw, "w", "(u16)xsat((s32)$a + $b, 0, 65535)")
+	case 0xe0: lanes(&as, nb, "b", "(u8)(((u32)$a + $b + 1) >> 1)")
+	case 0xe3: lanes(&as, nw, "w", "(u16)(((u32)$a + $b + 1) >> 1)")
+	case 0xe4: lanes(&as, nw, "w", "(u16)(((u32)$a * $b) >> 16)")
+	case 0xe5: for i in 0 ..< nw {add(&as, "w[%d] = (u16)((u32)((s32)_d.sw[%d] * _s.sw[%d]) >> 16)", i, i, i)}
+	case 0xe8: for i in 0 ..< nb {add(&as, "b[%d] = (u8)xsat((s32)(s8)_d.b[%d] - (s8)_s.b[%d], -128, 127)", i, i, i)}
+	case 0xe9: for i in 0 ..< nw {add(&as, "w[%d] = (u16)xsat((s32)_d.sw[%d] - _s.sw[%d], -32768, 32767)", i, i, i)}
+	case 0xec: for i in 0 ..< nb {add(&as, "b[%d] = (u8)xsat((s32)(s8)_d.b[%d] + (s8)_s.b[%d], -128, 127)", i, i, i)}
+	case 0xed: for i in 0 ..< nw {add(&as, "w[%d] = (u16)xsat((s32)_d.sw[%d] + _s.sw[%d], -32768, 32767)", i, i, i)}
+	case 0xea: lanes(&as, nw, "sw", "$a < $b ? $a : $b")
+	case 0xee: lanes(&as, nw, "sw", "$a > $b ? $a : $b")
+	case 0xf4: for i in 0 ..< nq {add(&as, "q[%d] = (u64)_d.u[%d] * _s.u[%d]", i, 2 * i, 2 * i)}
+	case 0xf5: // pmaddwd (the one overflow, both pairs -32768 * -32768, wraps to 0x80000000 as on the CPU)
+		for i in 0 ..< nd {
+			add(&as, "u[%d] = (u32)((s32)_d.sw[%d] * _s.sw[%d]) + (u32)((s32)_d.sw[%d] * _s.sw[%d])", i, 2 * i, 2 * i, 2 * i + 1, 2 * i + 1)
+		}
+	case 0xf6: // psadbw: per 8-byte half, the sum of absolute byte differences in its low word, the rest 0
+		for k in 0 ..< nq {
+			sb := strings.builder_make(context.temp_allocator)
+			fmt.sbprintf(&sb, "q[%d] = (u64)(0", k)
+			for j in 8 * k ..< 8 * k + 8 {fmt.sbprintf(&sb, " + (_d.b[%d] > _s.b[%d] ? _d.b[%d] - _s.b[%d] : _s.b[%d] - _d.b[%d])", j, j, j, j, j, j)}
+			fmt.sbprintf(&sb, ")")
+			append(&as, strings.to_string(sb))
+		}
+	case 0xf8: lanes(&as, nb, "b", "(u8)($a - $b)")
+	case 0xf9: lanes(&as, nw, "w", "(u16)($a - $b)")
+	case 0xfa: lanes(&as, nd, "u", "$a - $b")
+	case 0xfc: lanes(&as, nb, "b", "(u8)($a + $b)")
+	case 0xfd: lanes(&as, nw, "w", "(u16)($a + $b)")
+	case 0xfe: lanes(&as, nd, "u", "$a + $b")
+	case: return as, false
+	}
+	return as, true
+}
+
+// the shifts by an immediate, 0F 71 / 72 / 73 /r ib (mm and, with 66, xmm): group g (the ModR/M reg field) of width
+// 16 (71), 32 (72) or 64 (73) bits, count n; and 66 0F 73 /3 psrldq, /7 pslldq (whole-register byte shifts, xmm only)
+simd_shift_imm_assigns :: proc(opc2: u8, g: u8, n: u32, bytes: int) -> (as: [dynamic]string, ok: bool) {
+	as = make([dynamic]string, context.temp_allocator)
+	add :: proc(as: ^[dynamic]string, f: string, args: ..any) {append(as, fmt.tprintf(f, ..args))}
+	switch {
+	case opc2 == 0x71 && g == 2: for i in 0 ..< bytes / 2 {add(&as, "w[%d] = %s", i, n > 15 ? "0" : fmt.tprintf("(u16)((u32)_d.w[%d] >> %d)", i, n))}
+	case opc2 == 0x71 && g == 4: for i in 0 ..< bytes / 2 {add(&as, "sw[%d] = (s16)((s32)_d.sw[%d] >> %d)", i, i, min(n, 15))}
+	case opc2 == 0x71 && g == 6: for i in 0 ..< bytes / 2 {add(&as, "w[%d] = %s", i, n > 15 ? "0" : fmt.tprintf("(u16)((u32)_d.w[%d] << %d)", i, n))}
+	case opc2 == 0x72 && g == 2: for i in 0 ..< bytes / 4 {add(&as, "u[%d] = %s", i, n > 31 ? "0" : fmt.tprintf("_d.u[%d] >> %d", i, n))}
+	case opc2 == 0x72 && g == 4: for i in 0 ..< bytes / 4 {add(&as, "s[%d] = _d.s[%d] >> %d", i, i, min(n, 31))}
+	case opc2 == 0x72 && g == 6: for i in 0 ..< bytes / 4 {add(&as, "u[%d] = %s", i, n > 31 ? "0" : fmt.tprintf("_d.u[%d] << %d", i, n))}
+	case opc2 == 0x73 && g == 2: for i in 0 ..< bytes / 8 {add(&as, "q[%d] = xsh64r(_d.q[%d], %du)", i, i, min(n, 64))}
+	case opc2 == 0x73 && g == 6: for i in 0 ..< bytes / 8 {add(&as, "q[%d] = xsh64l(_d.q[%d], %du)", i, i, min(n, 64))}
+	case opc2 == 0x73 && g == 3 && bytes == 16: for i in 0 ..< 16 {add(&as, "b[%d] = %s", i, int(n) + i < 16 ? fmt.tprintf("_d.b[%d]", int(n) + i) : "0")}
+	case opc2 == 0x73 && g == 7 && bytes == 16: for i in 0 ..< 16 {add(&as, "b[%d] = %s", i, i >= int(n) ? fmt.tprintf("_d.b[%d]", i - int(n)) : "0")}
+	case: return as, false
+	}
+	return as, true
+}
+
+// SSSE3 pmaddubsw (66 0F 38 04: unsigned bytes of _d times signed bytes of _s, adjacent pairs summed with signed
+// saturation) and pshufb (66 0F 38 00), on `bytes`-byte registers
+simd_ssse3_assigns :: proc(m: x86.Mnemonic, bytes: int) -> (as: [dynamic]string, ok: bool) {
+	as = make([dynamic]string, context.temp_allocator)
+	#partial switch m {
+	case .PMADDUBSW:
+		for i in 0 ..< bytes / 2 {
+			append(&as, fmt.tprintf("w[%d] = (u16)xsat((s32)_d.b[%d] * (s8)_s.b[%d] + (s32)_d.b[%d] * (s8)_s.b[%d], -32768, 32767)", i, 2 * i, 2 * i, 2 * i + 1, 2 * i + 1))
+		}
+	case .PSHUFB:
+		for i in 0 ..< bytes {append(&as, fmt.tprintf("b[%d] = (_s.b[%d] & 0x80u) ? 0 : _d.b[_s.b[%d] & %du]", i, i, i, bytes - 1))}
+	case: return as, false
+	}
+	return as, true
 }

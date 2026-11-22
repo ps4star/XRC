@@ -551,6 +551,19 @@ XRC_INLINE void xrc_cpuid(u32 *a, u32 *b, u32 *c, u32 *d) {
 	}
 }
 
+/* the saturating SIMD integer ops (packs, padds / psubs, pmaddubsw): v clamped to [lo, hi] */
+XRC_INLINE s32 xsat(s32 v, s32 lo, s32 hi) { return v < lo ? lo : v > hi ? hi : v; }
+/* rdtsc: the host's time-stamp counter on an x86 host, elsewhere a counter that only goes up (code reads it for
+ * timings and as a seed) */
+XRC_INLINE u64 xrc_rdtsc(void) {
+#if defined(__x86_64__) || defined(__i386__)
+	return __builtin_ia32_rdtsc();
+#else
+	static u64 t;
+	return t += 1000;
+#endif
+}
+
 /* carry produced by add/sub/neg (shifts set cf inline) */
 XRC_INLINE u32 xcf_add(u8 sz, u32 a, u32 r) { return (r & xcc_mask(sz)) < (a & xcc_mask(sz)); }
 XRC_INLINE u32 xcf_sub(u8 sz, u32 a, u32 b) { return (a & xcc_mask(sz)) < (b & xcc_mask(sz)); }

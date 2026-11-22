@@ -683,8 +683,33 @@ x_emit :: proc(xl: ^Xlat, ins: ^Rx_Ins) {
 		case 0xfb: e = "_a - _b"
 		case 0xfe: e = lanes("+")
 		case 0xfa: e = lanes("-")
+		case:
+			// the rest: lane by lane in the low half of an X128 (the SSE2 form's lane code, simd_int_assigns)
+			as, ok := simd_int_assigns(ins.opc2, 8)
+			if !ok {fail(xl, "mmx op"); return}
+			sb := strings.builder_make(context.temp_allocator)
+			fmt.sbprintf(&sb, "    {{ X128 _d, _s, _r; _d.q[0] = x_mm[%d]; _d.q[1] = 0; _s.q[0] = %s; _s.q[1] = 0; _r = _d;", ins.xr, src)
+			for a in as {fmt.sbprintf(&sb, " _r.%s;", a)}
+			fmt.sbprintf(&sb, " x_mm[%d] = _r.q[0]; }}", ins.xr)
+			p(xl, strings.to_string(sb), "\n")
+			return
 		}
 		pf(xl, "    { u64 _a = x_mm[%d], _b = %s; x_mm[%d] = %s; }", ins.xr, src, ins.xr, e)
+		return
+	case .SHIFT_IMM:
+		as, ok := simd_shift_imm_assigns(ins.opc2, ins.xr, u32(ins.ximm), ins.p66 ? 16 : 8)
+		if !ok {fail(xl, "psxx imm"); return}
+		sb := strings.builder_make(context.temp_allocator)
+		if ins.p66 {
+			xl.uses_x = true
+			fmt.sbprintf(&sb, "    {{ X128 _d = X[%d], _r = _d;", ins.xrm)
+		} else {
+			xl.uses_mm = true
+			fmt.sbprintf(&sb, "    {{ X128 _d, _r; _d.q[0] = x_mm[%d]; _d.q[1] = 0; _r = _d;", ins.xrm)
+		}
+		for a in as {fmt.sbprintf(&sb, " _r.%s;", a)}
+		if ins.p66 {fmt.sbprintf(&sb, " X[%d] = _r; }}", ins.xrm)} else {fmt.sbprintf(&sb, " x_mm[%d] = _r.q[0]; }}", ins.xrm)}
+		p(xl, strings.to_string(sb), "\n")
 		return
 	case .EMMS: return
 	case .UD:
@@ -932,6 +957,9 @@ x_emit :: proc(xl: ^Xlat, ins: ^Rx_Ins) {
 	case .XCHG:
 		// (66 90, xchg ax, ax: a 2-byte nop in padding)
 		if b := exe_read(ins.addr, 2); ins.len == 2 && len(b) == 2 && b[0] == 0x66 && b[1] == 0x90 {pf(xl, "    /* nop */"); break}
+		// (F3 90, pause: decoded as a rep xchg eax, eax; a spin-wait hint, nothing to do. A loop around it gives the GIL
+		// away at its back edge, see x_spin_plan)
+		if b := exe_read(ins.addr, 2); ins.len == 2 && len(b) == 2 && b[0] == 0xf3 && b[1] == 0x90 {pf(xl, "    /* pause */"); break}
 		x_xchg(xl, ops[:], ea, have_ea)
 	case .LEAVE: pf(xl, "    r_esp = r_ebp; r_ebp = M32(r_esp); r_esp += 4;")
 	case .NOP, .FNOP: // nothing
@@ -999,6 +1027,8 @@ x_emit :: proc(xl: ^Xlat, ins: ^Rx_Ins) {
 		pf(xl, "    { u32 _v = M32(r_esp); r_esp += 4; cc_op = CC_RAW; cc_r = xrc_eflags_unpack(_v); cf = _v & 1u; }")
 	case .CPUID:
 		pf(xl, "    xrc_cpuid(&r_eax, &r_ebx, &r_ecx, &r_edx);")
+	case .RDTSC:
+		pf(xl, "    { u64 _t = xrc_rdtsc(); r_eax = (u32)_t; r_edx = (u32)(_t >> 32); }")
 	case .SAHF:
 		xl.uses_f = true
 		pf(xl, "    { u32 _h = (r_eax >> 8) & 0xffu, _o = xcc(cc_op, cc_sz, cc_a, cc_b, cc_r) & XF_OF; cc_op = CC_RAW; cc_r = _o | ((_h & 0x80u) ? XF_SF : 0u) | ((_h & 0x40u) ? XF_ZF : 0u) | ((_h & 4u) ? XF_PF : 0u); cf = _h & 1u; }")
