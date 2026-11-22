@@ -275,3 +275,32 @@ const unsigned xrc_manual_game_n = 3;
 const XrcManual xrc_manual_game[] = {{0x00e8d5a0u, xo_00e8d5a0, "frame due (fast: a minimum of idle work)"}};
 const unsigned xrc_manual_game_n = 1;
 #endif
+
+/* 00906430 (cdecl: out, fov, aspect (width / height), near, far): a perspective projection from a horizontal fov.
+ * Wider than 16:9 (ultrawide, xrc_widescreen) the minimap's (00a05290, the call returning to 00a054af) came out
+ * squashed: there the fov that keeps 16:9's vertical extent (Hor+), the minimap round. The other callers (the
+ * effects camera 00ce3c70, the screen <-> world helpers 00905830, 00e4a400) as they were: they go with the scene
+ * cameras, which build their projections elsewhere -- Vert- at ultrawide (the top and bottom cut, the proportions
+ * right; the code that would make them Hor+ not found yet). XRC_UW_FOV=0: off. */
+#include <math.h>
+void XRC_CC xo_00906430(XCtx *c) {
+	static XFn orig;
+	static int on = -1;
+	float fov, asp;
+	u32 f0 = M32(c->esp + 8);
+	if (!orig) orig = xrc_translation_of(0x00906430u);
+	if (on < 0) { const char *e = getenv("XRC_UW_FOV"); on = !(e && *e == '0'); }
+	memcpy(&fov, &f0, 4);
+	{ u32 a = M32(c->esp + 12); memcpy(&asp, &a, 4); }
+	if (on && M32(c->esp) == 0x00a054afu && asp > 16.0f / 9.0f * 1.01f && asp < 8.0f && fov > 0.0f && fov < 3.0f) {
+		float f = 2.0f * atanf(tanf(fov * 0.5f) * (asp * (9.0f / 16.0f)));
+		u32 v;
+		memcpy(&v, &f, 4);
+		M32(c->esp + 8) = v;
+		orig(c);
+		M32(c->esp + 8) = f0;
+		return;
+	}
+	orig(c);
+}
+
