@@ -660,6 +660,8 @@ enum { x_sm_ = 0x7f, x_fm_ = 0x7f };
  * that changed its return address is fatal, as it is for a call -- xrc_bad_return), the arguments too (ret N), then on
  * past the body (lbl_, the site's) */
 void xrc_bad_return(XCtx *c, u32 target);
+/* (XRC_STACK_VERIFY=1 translations: a direct call to a function the translator found stack-balanced left esp elsewhere) */
+void xrc_stack_bad(XCtx *c, u32 target, u32 esp, u32 expected);
 /* the call macros inside an inlined SSE body (xrc_translator x_inline_plan): the same ones, under names the
  * translator's renaming of an SSE caller's calls (to XCALLM*: its own xmm registers around them) does not touch --
  * the body moves its own (XI) around the call itself */

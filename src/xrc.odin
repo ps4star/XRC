@@ -1547,7 +1547,7 @@ x_call :: proc(xl: ^Xlat, ins: ^Rx_Ins, ops: []x86.Operand, ea: string, have_ea:
 				}
 				pf(xl, "    if (_a != _b) {{ XEA_T x_s_ = r_esp;")
 				x_call_fp(xl, ins, t, 0, direct)
-				pf(xl, "    if (r_esp >= x_s_) MX32(x_s_ - 4) = 0x%xu; }} else MX32(r_esp - 4) = 0x%xu; }", ins.addr + ins.len, ins.addr + ins.len)
+				pf(xl, "%s }} else MX32(r_esp - 4) = 0x%xu; }", x_post_call(xl, direct, ins.addr + ins.len), ins.addr + ins.len)
 				return
 			}
 		}
@@ -1569,7 +1569,7 @@ x_call :: proc(xl: ^Xlat, ins: ^Rx_Ins, ops: []x86.Operand, ea: string, have_ea:
 				} else {
 					pf(xl, "    {{ XEA_T x_s_ = r_esp;")
 					x_call_fp(xl, ins, x_hexu(d), 0, d)
-					pf(xl, "    if (r_esp >= x_s_) MX32(x_s_ - 4) = 0x%xu; }}", ra)
+					pf(xl, "%s }}", x_post_call(xl, d, ra))
 				}
 			}
 			pf(xl, "    }} else {{ XEA_T x_s_ = r_esp;")
@@ -1584,7 +1584,7 @@ x_call :: proc(xl: ^Xlat, ins: ^Rx_Ins, ops: []x86.Operand, ea: string, have_ea:
 	// callee moved the stack down (__SEH_prolog4, __chkstk): the slot is then inside the new frame, and live
 	pf(xl, "    { XEA_T x_s_ = r_esp;")
 	x_call_fp(xl, ins, t, 0, direct)
-	pf(xl, "    if (r_esp >= x_s_) MX32(x_s_ - 4) = 0x%xu; }", ins.addr + ins.len)
+	pf(xl, "%s }", direct != 0 ? x_post_call(xl, direct, ins.addr + ins.len) : fmt.tprintf("    if (r_esp >= x_s_) MX32(x_s_ - 4) = 0x%xu;", ins.addr + ins.len))
 }
 
 // XCALL / XCALLX with the x87 arguments and result of the call site (from the x87 flow pass). ra: the return
@@ -2098,6 +2098,8 @@ cmd_xrc :: proc(args: []string) -> int {
 	}
 	x_abi_plan(addrs[:], funcs)
 	lap(x_timing, &t_last, "callee-saved registers")
+	x_stack_plan(addrs[:], funcs)
+	lap(x_timing, &t_last, "stack balance")
 	// (every function's x87 effect first, in address order: the threads after it only read them)
 	x87_precompute()
 	x_sync_init()

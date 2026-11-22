@@ -68,6 +68,7 @@ void xrc_dispatch_ic(XCtx *c, u32 t, XIc *ic) {
 void xrc_imp_enter(u32 slot) { (void)slot; }
 void xrc_preempt_n(XCtx *c) { c->pre_n = 0; }
 void xrc_bad_return(XCtx *c, u32 t) { die("the function at %08x returned to an unexpected address", t); (void)c; }
+void xrc_stack_bad(XCtx *c, u32 t, u32 esp, u32 want) { fprintf(stderr, "runtime: esp %08x, not %08x: ", esp, want); die("after a call to %08x (XRC_STACK_VERIFY)", t); (void)c; }
 void xrc_ud(XCtx *c, u32 a) { (void)c; die("an undefined or privileged instruction at %08x", a); }
 
 /* ---- system calls and thread-local storage: Linux i386 */
