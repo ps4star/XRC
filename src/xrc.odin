@@ -300,7 +300,11 @@ x_reg_write :: proc(r: x86.Register, v: string) -> string {
 	}
 	h := x_home(r)
 	switch x86.reg_class(r) {
-	case x86.REG_GPR32: return fmt.tprintf("%s = (%s);", h, v)
+	case x86.REG_GPR32: 
+		// (r_esp and r_ebp are 64 bits wide, see x_flat_addr: any value but a plain variable -- a u32 temp, or the other
+		// of the two -- to 32 bits first: ~x, a 64-bit address sum, a signed conversion would set the high half)
+		if (h == "r_esp" || h == "r_ebp") && !x_is_ident(v) {return fmt.tprintf("%s = (u32)(%s);", h, v)}
+		return fmt.tprintf("%s = (%s);", h, v)
 	case x86.REG_GPR16: return fmt.tprintf("SET16(%s, %s);", h, v)
 	case x86.REG_GPR8:  return fmt.tprintf("SET8L(%s, %s);", h, v)
 	case x86.REG_GPR8H: return fmt.tprintf("SET8H(%s, %s);", h, v)
@@ -618,6 +622,7 @@ x_emit :: proc(xl: ^Xlat, ins: ^Rx_Ins) {
 
 	// an address temp if any operand is memory
 	ea, have_ea := "", false
+	flat_start := -1
 	mem_i := -1
 	for i in 0 ..< n {
 		if ops[i].kind == .MEMORY {mem_i = i; break}
@@ -631,11 +636,17 @@ x_emit :: proc(xl: ^Xlat, ins: ^Rx_Ins) {
 		if len(xl.slots) > 0 && mm.segment == 0 && x86.mem_has_base(mm) && x86.mem_base(mm) == x86.EBP && !x86.mem_has_index(mm) && mm.disp in xl.slots {
 			xl.slot_cur = mm.disp // (a promoted slot: x_translate puts its local in place of M32(_ea))
 			pf(xl, "    {")
+		} else if r, d, flat := x_flat_addr(mm); flat {
+			flat_start = len(xl.b.buf)
+			pf(xl, d < 0 ? "    { XEA_T _ea = (XEA_T)(%s) - 0x%xu;" : "    { XEA_T _ea = (XEA_T)(%s) + 0x%xu;", r, d < 0 ? u32(-d) : u32(d))
 		} else {
 			pf(xl, "    { u32 _ea = (%s);", a)
 		}
 	}
-	defer if have_ea {pf(xl, "    }")}
+	defer if have_ea {
+		if flat_start >= 0 && !xl.dry {x_flat_rewrite(xl, flat_start)}
+		pf(xl, "    }")
+	}
 
 	sz := ops[0].size if n > 0 else 4
 
@@ -742,6 +753,15 @@ x_emit :: proc(xl: ^Xlat, ins: ^Rx_Ins) {
 		b, okb := x_val(xl, ops[1], ea, have_ea)
 		if !oka || !okb {fail(xl, "operand"); return}
 		sz := ops[0].size
+		// sub / add esp, imm with no flag read: on the 64-bit r_esp itself (x_flat_addr), the frame's accesses then
+		// at constant offsets from the one value
+		if writes && x_flat_on && xl.fl_on && !x_fl_verify() && xl.fl_need[xl.cur] == 0 && ops[0].kind == .REGISTER && ops[0].reg == x86.ESP && ops[1].kind == .IMMEDIATE && (rexpr == "_a - _b" || rexpr == "_a + _b") {
+			// (the immediate sign-extended: add esp, -8 is a subtraction, never a 32-bit wrap of the 64-bit sum)
+			d := i64(i32(u32(ops[1].immediate)))
+			if rexpr == "_a - _b" {d = -d}
+			pf(xl, "    r_esp %s= 0x%xu;", d < 0 ? "-" : "+", u32(d < 0 ? -d : d))
+			return
+		}
 		pf(xl, "    { u32 _a = (%s), _b = (%s), _r = (%s);", a, b, rexpr)
 		if xl.fl_on && x_fl_verify() {
 			pf(xl, "      cc_op = %s; cc_sz = %d; cc_a = _a; cc_b = _b; cc_r = _r;", cc, sz)
@@ -819,13 +839,13 @@ x_emit :: proc(xl: ^Xlat, ins: ^Rx_Ins) {
 		}
 		// the value is read before esp moves (push esp pushes the old esp)
 		if strings.contains(v, "r_esp") {
-			pf(xl, "    {{ u32 _pv = (%s); r_esp -= %d; %s(r_esp) = _pv; }}", v, w, w == 2 ? "M16" : "M32")
+			pf(xl, "    {{ u32 _pv = (%s); r_esp -= %d; %s(r_esp) = _pv; }}", v, w, w == 2 ? "MX16" : "MX32")
 		} else {
-			pf(xl, "    r_esp -= %d; %s(r_esp) = (%s);", w, w == 2 ? "M16" : "M32", v)
+			pf(xl, "    r_esp -= %d; %s(r_esp) = (%s);", w, w == 2 ? "MX16" : "MX32", v)
 		}
 	case .POP:
 		w := ins.p66 ? 2 : 4
-		pf(xl, "    { u32 _v = %s(r_esp); r_esp += %d; %s }", w == 2 ? "M16" : "M32", w, x_store(ops[0], "_v", ea))
+		pf(xl, "    { u32 _v = %s(r_esp); r_esp += %d; %s }", w == 2 ? "MX16" : "MX32", w, x_store(ops[0], "_v", ea))
 	case .ADD: alu(xl, ins, ops[:], ea, have_ea, "CC_ADD", "_a + _b", true, "cf = xcf_add(cc_sz, _a, _r);")
 	case .SUB: alu(xl, ins, ops[:], ea, have_ea, "CC_SUB", "_a - _b", true, "cf = xcf_sub(cc_sz, _a, _b);")
 	case .CMP: alu(xl, ins, ops[:], ea, have_ea, "CC_SUB", "_a - _b", false, "cf = xcf_sub(cc_sz, _a, _b);")
@@ -969,7 +989,7 @@ x_emit :: proc(xl: ^Xlat, ins: ^Rx_Ins) {
 		// away at its back edge, see x_spin_plan)
 		if b := exe_read(ins.addr, 2); ins.len == 2 && len(b) == 2 && b[0] == 0xf3 && b[1] == 0x90 {pf(xl, "    /* pause */"); break}
 		x_xchg(xl, ops[:], ea, have_ea)
-	case .LEAVE: pf(xl, "    r_esp = r_ebp; r_ebp = M32(r_esp); r_esp += 4;")
+	case .LEAVE: pf(xl, "    r_esp = r_ebp; r_ebp = MX32(r_esp); r_esp += 4;")
 	case .NOP, .FNOP: // nothing
 	case .CALL: x_call(xl, ins, ops[:], ea, have_ea)
 	case .JMP: x_jmp(xl, ins, ops[:], ea, have_ea)
@@ -1028,11 +1048,11 @@ x_emit :: proc(xl: ^Xlat, ins: ^Rx_Ins) {
 		// EFLAGS from the lazy flags + the guest's system bits (xrc_eflags_sys: IF, DF, ID, ...)
 		if ins.p66 {fail(xl, "pushf16"); return}
 		xl.uses_f = true
-		pf(xl, "    r_esp -= 4; M32(r_esp) = xrc_eflags_pack(xcc(cc_op, cc_sz, cc_a, cc_b, cc_r), cf);")
+		pf(xl, "    r_esp -= 4; MX32(r_esp) = xrc_eflags_pack(xcc(cc_op, cc_sz, cc_a, cc_b, cc_r), cf);")
 	case .POPF, .POPFD:
 		if ins.p66 {fail(xl, "popf16"); return}
 		xl.uses_f = true
-		pf(xl, "    { u32 _v = M32(r_esp); r_esp += 4; cc_op = CC_RAW; cc_r = xrc_eflags_unpack(_v); cf = _v & 1u; }")
+		pf(xl, "    { u32 _v = MX32(r_esp); r_esp += 4; cc_op = CC_RAW; cc_r = xrc_eflags_unpack(_v); cf = _v & 1u; }")
 	case .CPUID:
 		pf(xl, "    xrc_cpuid(&r_eax, &r_ebx, &r_ecx, &r_edx);")
 	case .RDTSC:
@@ -1440,7 +1460,7 @@ x_inline_site :: proc(xl: ^Xlat, ins: ^Rx_Ins, target: u32, il: X_Inline, alt :=
 	site := alt == 0 ? fmt.tprintf("%x", ins.addr) : fmt.tprintf("%x_%d", ins.addr, alt)
 	ra := ins.addr + ins.len
 	pf(xl, "    /* inlined %08x */", target)
-	pf(xl, "    {{ r_esp -= 4; M32(r_esp) = 0x%xu;", ra)
+	pf(xl, "    {{ r_esp -= 4; MX32(r_esp) = 0x%xu;", ra)
 	// (SSE: the callee's xmm registers its own locals XI, from XCtx as at a call -- the caller's own ones there first,
 	// XRC_IXOUT_ -- and back at its returns, then the caller's again, XRC_IXIN_: x_append_function defines those)
 	xst := ""
@@ -1501,7 +1521,7 @@ x_inline_site :: proc(xl: ^Xlat, ins: ^Rx_Ins, target: u32, il: X_Inline, alt :=
 x_call :: proc(xl: ^Xlat, ins: ^Rx_Ins, ops: []x86.Operand, ea: string, have_ea: bool) {
 	// `call $+5; pop reg` (PIC code reading its own address): only the push
 	if ops[0].kind == .RELATIVE && rx_rel_target(ins, 0) == ins.addr + ins.len {
-		pf(xl, "    r_esp -= 4; M32(r_esp) = 0x%xu; /* call $+5 */", ins.addr + ins.len)
+		pf(xl, "    r_esp -= 4; MX32(r_esp) = 0x%xu; /* call $+5 */", ins.addr + ins.len)
 		return
 	}
 	t := ""
@@ -1525,9 +1545,9 @@ x_call :: proc(xl: ^Xlat, ins: ^Rx_Ins, ops: []x86.Operand, ea: string, have_ea:
 				} else {
 					pf(xl, "    { u32 _a = r_ecx, _b = M32(0x%xu); cc_op = CC_SUB; cc_sz = 4; cc_a = _a; cc_b = _b; cc_r = _a - _b; cf = _a < _b;", ck)
 				}
-				pf(xl, "    if (_a != _b) {{ u32 x_s_ = r_esp;")
+				pf(xl, "    if (_a != _b) {{ XEA_T x_s_ = r_esp;")
 				x_call_fp(xl, ins, t, 0, direct)
-				pf(xl, "    if (r_esp >= x_s_) M32(x_s_ - 4) = 0x%xu; }} else M32(r_esp - 4) = 0x%xu; }", ins.addr + ins.len, ins.addr + ins.len)
+				pf(xl, "    if (r_esp >= x_s_) MX32(x_s_ - 4) = 0x%xu; }} else MX32(r_esp - 4) = 0x%xu; }", ins.addr + ins.len, ins.addr + ins.len)
 				return
 			}
 		}
@@ -1547,14 +1567,14 @@ x_call :: proc(xl: ^Xlat, ins: ^Rx_Ins, ops: []x86.Operand, ea: string, have_ea:
 				if il, is_il := x_inline[d]; is_il && d != xl.addr && (e.transparent || (e.kin == 0 && e.kout == 0)) {
 					x_inline_site(xl, ins, d, il, di)
 				} else {
-					pf(xl, "    {{ u32 x_s_ = r_esp;")
+					pf(xl, "    {{ XEA_T x_s_ = r_esp;")
 					x_call_fp(xl, ins, x_hexu(d), 0, d)
-					pf(xl, "    if (r_esp >= x_s_) M32(x_s_ - 4) = 0x%xu; }}", ra)
+					pf(xl, "    if (r_esp >= x_s_) MX32(x_s_ - 4) = 0x%xu; }}", ra)
 				}
 			}
-			pf(xl, "    }} else {{ u32 x_s_ = r_esp;")
+			pf(xl, "    }} else {{ XEA_T x_s_ = r_esp;")
 			x_call_fp(xl, ins, "x_dv_", 0, 0)
-			pf(xl, "    if (r_esp >= x_s_) M32(x_s_ - 4) = 0x%xu; }} }}", ra)
+			pf(xl, "    if (r_esp >= x_s_) MX32(x_s_ - 4) = 0x%xu; }} }}", ra)
 			xl.n_devirt += 1
 			return
 		}
@@ -1562,9 +1582,9 @@ x_call :: proc(xl: ^Xlat, ins: ^Rx_Ins, ops: []x86.Operand, ea: string, have_ea:
 	// the call's push of the return address leaves the host return address in the dead slot below the guest esp;
 	// put the original's there (code reads such stale slots as uninitialized locals of the next call) -- unless the
 	// callee moved the stack down (__SEH_prolog4, __chkstk): the slot is then inside the new frame, and live
-	pf(xl, "    { u32 x_s_ = r_esp;")
+	pf(xl, "    { XEA_T x_s_ = r_esp;")
 	x_call_fp(xl, ins, t, 0, direct)
-	pf(xl, "    if (r_esp >= x_s_) M32(x_s_ - 4) = 0x%xu; }", ins.addr + ins.len)
+	pf(xl, "    if (r_esp >= x_s_) MX32(x_s_ - 4) = 0x%xu; }", ins.addr + ins.len)
 }
 
 // XCALL / XCALLX with the x87 arguments and result of the call site (from the x87 flow pass). ra: the return
@@ -1657,9 +1677,9 @@ x_jmp :: proc(xl: ^Xlat, ins: ^Rx_Ins, ops: []x86.Operand, ea: string, have_ea: 
 // pops its arguments), put it back and return through it
 x_tail :: proc(xl: ^Xlat, ins: ^Rx_Ins, t: string, key: u32 = 0, direct: u32 = 0) {
 	k := key != 0 ? key : ins.addr
-	pf(xl, "    { u32 x_ip_ = M32(r_esp); r_esp += 4;")
+	pf(xl, "    { u32 x_ip_ = MX32(r_esp); r_esp += 4;")
 	x_call_fp(xl, ins, t, k, direct, "x_ip_")
-	pf(xl, "    r_esp -= 4; M32(r_esp) = x_ip_; }")
+	pf(xl, "    r_esp -= 4; MX32(r_esp) = x_ip_; }")
 	if xl.fret {
 		e := xl.callfp[k]
 		pf(xl, e.kout >= 1 ? "    XRC_FRET(f0);" : "    XRC_FRET(0.0);")
@@ -2081,6 +2101,7 @@ cmd_xrc :: proc(args: []string) -> int {
 	// (every function's x87 effect first, in address order: the threads after it only read them)
 	x87_precompute()
 	x_sync_init()
+	x_flat_on = !ir_mode && os.get_env("XRC_FLAT_EA", context.temp_allocator) != "0"
 	_, _, _ = x_fl_disabled(), x_fl_verify(), x_fl_debug()
 	lap(x_timing, &t_last, "x87 effects")
 	if all {x_inline_plan(addrs[:], funcs); x_devirt_load()}
@@ -2386,7 +2407,7 @@ x_append_function :: proc(sb: ^strings.Builder, xl: ^Xlat) {
 	if xl.uses_ix {strings.write_string(sb, xl.uses_x ? "#define XRC_IXOUT_ XRC_XOUT_\n#define XRC_IXIN_ XRC_XIN_\n" : "#define XRC_IXOUT_\n#define XRC_IXIN_\n")}
 	fmt.sbprintf(sb, "void XRC_CC xf_%08x(XCtx *c) {{\n", xl.addr)
 	fmt.sbprintf(sb, "    u32 r_eax = c->eax, r_ecx = c->ecx, r_edx = c->edx, r_ebx = c->ebx;\n")
-	fmt.sbprintf(sb, "    u32 r_esp = c->esp, r_ebp = c->ebp, r_esi = c->esi, r_edi = c->edi;\n")
+	fmt.sbprintf(sb, "    XEA_T r_esp = c->esp, r_ebp = c->ebp; u32 r_esi = c->esi, r_edi = c->edi;\n")
 	if xl.uses_f {
 		fmt.sbprintf(sb, "    u32 cc_a = 0, cc_b = 0, cc_r = 0, cf = 0; u8 cc_op = 0, cc_sz = 4;\n")
 		if xl.fl_on && x_fl_verify() {fmt.sbprintf(sb, "    u32 p_a = 0, p_b = 0, p_r = 0, p_cf = 0; u8 p_op = 0, p_sz = 4;\n")}

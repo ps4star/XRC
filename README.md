@@ -271,6 +271,7 @@ Every variable is optional. The defaults are the settings the FINAL FANTASY XIII
 | `XRC_NO_SLOTS=1` | off | Turns [stack slot promotion](#optimizations) off. Measured no faster on FINAL FANTASY XIII and riskier, so its build always sets this. |
 | `XRC_FLAGS_OLD=1` | off | Turns flag liveness and compare-branch fusion off: every flag is computed lazily, as in xrc's first output. For comparison. |
 | `XRC_SYNC_TRIM=0` | on | Turns register-sync trimming off, so every call and return saves and reloads every register. |
+| `XRC_FLAT_EA=0` | on | Turns flat addressing off. When on, `[reg + small displacement]` addresses are 64-bit sums (`MX*` accesses) and `esp`/`ebp` live in 64-bit C variables, so the host compiler folds each displacement into one instruction instead of a separate 32-bit add (FF13: code 5% smaller, main thread 3-4% faster). Only addresses that would wrap past 0 or 4 GB differ, and none of those is valid. |
 | `XRC_ABI_KEEP=0` | on | Turns the callee-saved register plan off: every direct call reloads ebx, esi, edi and ebp afterwards. |
 | `XRC_INLINE=0` | on | Turns inlining off. |
 | `XRC_INLINE_MAX=N` | 24 | Inlines functions of up to N instructions. |

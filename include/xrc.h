@@ -115,6 +115,27 @@ extern u8 *xrc_mem;
 #define M64(a) (*(u64 *)(XM + (u32)(a)))
 #define MF32(a) (*(float *)(XM + (u32)(a)))
 #define MF64(a) (*(double *)(XM + (u32)(a)))
+/* MX*: an access whose address is a u64 the translator built as (u32)(registers) + a small signed displacement (it
+ * does that for [reg + disp]: the displacement then folds into the host instruction's, not a separate 32-bit add that
+ * wraps). Only an address that would have wrapped past 0 or 4 GB differs, and none of those is a valid one. With
+ * XM 0 (in-game / check builds) the same as M*. */
+#if defined(XRC_INGAME) || defined(XRC_CHECK)
+#define XEA_T u32
+#define MX8(a) M8(a)
+#define MX16(a) M16(a)
+#define MX32(a) M32(a)
+#define MX64(a) M64(a)
+#define MXF32(a) MF32(a)
+#define MXF64(a) MF64(a)
+#else
+#define XEA_T unsigned long long
+#define MX8(a) (*(u8 *)(XM + (a)))
+#define MX16(a) (*(u16 *)(XM + (a)))
+#define MX32(a) (*(u32 *)(XM + (a)))
+#define MX64(a) (*(u64 *)(XM + (a)))
+#define MXF32(a) (*(float *)(XM + (a)))
+#define MXF64(a) (*(double *)(XM + (a)))
+#endif
 
 /* per guest thread (portable: each guest thread is a host thread) */
 #ifdef _MSC_VER
@@ -271,9 +292,13 @@ XRC_INLINE u64 xsh64r(u64 v, u32 n) { u32 lo = (u32)v, hi = (u32)(v >> 32); if (
 #ifdef XRC_VEC
 #define XLD(x_, a_) ((x_).vi = _mm_loadu_si128((const __m128i *)(XM + (u32)(a_))))
 #define XST(a_, x_) _mm_storeu_si128((__m128i *)(XM + (u32)(a_)), (x_).vi)
+#define XLDX(x_, a_) ((x_).vi = _mm_loadu_si128((const __m128i *)(XM + (a_))))
+#define XSTX(a_, x_) _mm_storeu_si128((__m128i *)(XM + (a_)), (x_).vi)
 #else
 #define XLD(x_, a_) ((x_).u[0] = M32(a_), (x_).u[1] = M32((a_) + 4), (x_).u[2] = M32((a_) + 8), (x_).u[3] = M32((a_) + 12))
 #define XST(a_, x_) (M32(a_) = (x_).u[0], M32((a_) + 4) = (x_).u[1], M32((a_) + 8) = (x_).u[2], M32((a_) + 12) = (x_).u[3])
+#define XLDX(x_, a_) XLD(x_, (u32)(a_))
+#define XSTX(a_, x_) XST((u32)(a_), x_)
 #endif
 
 
@@ -624,7 +649,7 @@ enum { x_sm_ = 0x7f, x_fm_ = 0x7f };
 /* ---- return (ret / ret N): pop the guest return address, publish registers, map esp back ---- */
 #define XRC_RETURN(nbytes)                                                                                          \
 	do {                                                                                                            \
-		u32 _ip_ = M32(r_esp);                                                                                      \
+		u32 _ip_ = MX32(r_esp);                                                                                      \
 		r_esp += 4u + (u32)(nbytes);                                                                                \
 		XRC_SPILL_REGS                                                                                              \
 		c->esp = XRC_ESP_OUT; c->eip = _ip_;                                                                        \
@@ -643,7 +668,7 @@ void xrc_bad_return(XCtx *c, u32 target);
 #define XC_ XCALL
 #define XRC_INL_RET(nbytes, ra_, tgt_, lbl_)                                                                         \
 	{                                                                                                               \
-		u32 _ip_ = M32(r_esp);                                                                                      \
+		u32 _ip_ = MX32(r_esp);                                                                                      \
 		r_esp += 4u + (u32)(nbytes);                                                                                \
 		if (_ip_ != (ra_)) {                                                                                        \
 			c->eax = r_eax; c->ecx = r_ecx; c->edx = r_edx; c->ebx = r_ebx;                                         \
@@ -876,7 +901,7 @@ void xrc_preempt_n(XCtx *c);
 #define XRC_PREEMPT_N 64u
 #define XRC_PREEMPT() { if (xrc_gil_waiters && ++c->pre_n >= XRC_PREEMPT_N) xrc_preempt_n(c); }
 #ifdef XRC_NO_IC
-#define XCALL(tgt) { u32 t_ = (tgt); r_esp -= 4; M32(r_esp) = x_ra_; XRC_SPILL xrc_dispatch(c, t_); XRC_FILL }
+#define XCALL(tgt) { u32 t_ = (tgt); r_esp -= 4; MX32(r_esp) = x_ra_; XRC_SPILL xrc_dispatch(c, t_); XRC_FILL }
 #else
 /* an inline cache per call site (an indirect call: a vtable, a function pointer, a callback): the last target and
  * its function; a hit calls it as XCALLD does (no search by address, no call-stack record), a miss goes through
@@ -890,7 +915,7 @@ void xrc_imp_enter(u32 slot);
 extern volatile int xrc_gil_waiters;
 void xrc_preempt(void);
 void xrc_bad_return(XCtx *c, u32 target);
-#define XCALL(tgt) { static XIc ic_ = {0xffffffffu, 0, 0}; u32 t_ = (tgt); r_esp -= 4; M32(r_esp) = x_ra_; XRC_SPILL \
+#define XCALL(tgt) { static XIc ic_ = {0xffffffffu, 0, 0}; u32 t_ = (tgt); r_esp -= 4; MX32(r_esp) = x_ra_; XRC_SPILL \
 	if (t_ == ic_.addr) { XRC_PREEMPT() if (ic_.imp) xrc_imp_enter(ic_.imp - 1u); XRC_DS_PUSH(t_) ic_.fn(c); XRC_DS_POP() \
 		if (c->eip != x_ra_) xrc_bad_return(c, t_); } \
 	else xrc_dispatch_ic(c, t_, &ic_); XRC_FILL }
@@ -934,7 +959,7 @@ void xrc_abi_violation(u32 target, u32 ra, unsigned mask);
 #else
 #define XRC_ABI_NOTE(tgt)
 #endif
-#define XCALLD(tgt, fn) { r_esp -= 4; M32(r_esp) = x_ra_; XRC_SPILL XRC_PREEMPT() XRC_DS_PUSH(tgt) fn(c); XRC_DS_POP() \
+#define XCALLD(tgt, fn) { r_esp -= 4; MX32(r_esp) = x_ra_; XRC_SPILL XRC_PREEMPT() XRC_DS_PUSH(tgt) fn(c); XRC_DS_POP() \
 	if (c->eip != x_ra_) xrc_bad_return(c, (tgt)); XRC_ABI_NOTE(tgt) XRC_FILL }
 /* the backward jump of a call-free loop with an atomic in it (xchg / lock / pause: a spin lock): the GIL to a waiting
  * thread, which may be the one holding the lock (without this the spinner keeps the GIL forever: a deadlock) */
@@ -964,7 +989,7 @@ void xrc_spin_yield(void);
 #else
 #define XRC_ABI_NOTE_K(tgt, m_)
 #endif
-#define XCALLDK(tgt, fn, m_) { r_esp -= 4; M32(r_esp) = x_ra_; XRC_SPILL XRC_PREEMPT() XRC_DS_PUSH(tgt) fn(c); XRC_DS_POP() \
+#define XCALLDK(tgt, fn, m_) { r_esp -= 4; MX32(r_esp) = x_ra_; XRC_SPILL XRC_PREEMPT() XRC_DS_PUSH(tgt) fn(c); XRC_DS_POP() \
 	if (c->eip != x_ra_) xrc_bad_return(c, (tgt)); XRC_ABI_NOTE_K(tgt, m_) XRC_FILL_K(m_) }
 #define XCALLXDK(tgt, kin_, kout_, fn, m_) { if ((kin_) >= 1) c->fa[0] = x_fa[0]; if ((kin_) >= 2) c->fa[1] = x_fa[1]; XCALLDK(tgt, fn, m_) if ((kout_) >= 1) x_fret = c->st0; }
 #define XCALLMDK(tgt, fn, m_) { XRC_XOUT_ XCALLDK(tgt, fn, m_) XRC_XIN_ }
