@@ -70,16 +70,8 @@ typedef struct XCtx {
 	u32 pre_n;                                  /* 204: calls since the last xrc_preempt_n (XRC_PREEMPT) */
 } XCtx;
 
-/* XRC_PNONE (an A/B experiment; clang, x86-64 only): translated functions use clang's preserve_none calling
- * convention -- the callee saves no host registers (no push / pop at every entry and exit), the caller keeps only
- * what it needs across the call. XRC_CC marks every function of that type: the translations (xrc emits it) and
- * the runtime's overrides and manual entries. Pages, dispatch table and runtime must all be built with it or without. */
-#if defined(XRC_PNONE) && defined(__clang__) && defined(__x86_64__)
-#define XRC_CC __attribute__((preserve_none))
-#else
-#undef XRC_PNONE
+/* XRC_CC: the calling convention of the translated functions and the runtime's overrides (the normal one) */
 #define XRC_CC
-#endif
 typedef void (XRC_CC *XFn)(XCtx *);
 
 /* ---- guest memory ---- */
