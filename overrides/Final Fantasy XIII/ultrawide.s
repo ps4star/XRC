@@ -19,6 +19,8 @@
 .set UW_MM,     0x02871f14 # 4/3 while UW_FLAG, else 1.0
 .set UW_SCRH,   0x02871f18 # the back buffer's height (int)
 .set UW_FOVADD, 0x02871f1c # degrees added to the field camera's fov (F5 / F6 / F7: vk_d3d9.c fov_key; 0 = none)
+.set UW_BBW,    0x02871f20 # the back buffer's width, height (any aspect; 0 before CreateDevice)
+.set UW_BBH,    0x02871f24
 # the game's constants
 .set F_1280,    0x0114a9e4 # 1280.0
 .set F_HALF,    0x0109b130 # 0.5
@@ -70,6 +72,11 @@ HOOK 00ce2d0c, c_ce2d0c
 HOOK 00fee4f8, c_fee4f8
 # 00a68b70: the scissor it sets (00eabfe0: x, y, w, h) from x 1, 8192 wide
 HOOK 00a68ebb, c_a68ebb
+# 0094c890 (the battle's enemy intel): the Notes line's scissor, 00906240(x, y, w, h), in the UI's 1280 x 720 pixels
+# (0, 496, 00905f70's 1280, (lines + 8) x 5) whatever the back buffer -- the retail game's bug: the line clipped away
+# above 720p. Not the mod's: scaled to the back buffer, y and h by its height / 720, x and w by its width / 1280
+# (ultrawide: 0 and its width). With no back buffer size yet (UW_BBH 0): as it was
+HOOK 0094c934, c_94c934
 # 0062c000 (the field camera's fov, returned on the x87 stack): UW_FOVADD degrees more
 HOOK 0062c03a, c_62c03a
 # 01008e00 (a full-screen quad): a centred 16:9 quad
@@ -203,6 +210,40 @@ c_a68ebb:
 	mov dword ptr [esp + 8], 0x2000
 1:	call 0x00eabfe0
 	jmp 0x00a68ec0
+
+c_94c934:
+	cmp dword ptr [UW_BBH], 0
+	je 9f
+	mov ecx, 720
+	mov eax, dword ptr [esp + 4]
+	imul eax, dword ptr [UW_BBH]
+	cdq
+	idiv ecx
+	mov dword ptr [esp + 4], eax
+	mov eax, dword ptr [esp + 12]
+	imul eax, dword ptr [UW_BBH]
+	cdq
+	idiv ecx
+	mov dword ptr [esp + 12], eax
+	cmp dword ptr [UW_FLAG], 0
+	jne 2f
+	mov ecx, 1280
+	mov eax, dword ptr [esp]
+	imul eax, dword ptr [UW_BBW]
+	cdq
+	idiv ecx
+	mov dword ptr [esp], eax
+	mov eax, dword ptr [esp + 8]
+	imul eax, dword ptr [UW_BBW]
+	cdq
+	idiv ecx
+	mov dword ptr [esp + 8], eax
+	jmp 9f
+2:	mov dword ptr [esp], 0
+	mov eax, dword ptr [UW_BBW]
+	mov dword ptr [esp + 8], eax
+9:	call 0x00906240
+	jmp 0x0094c939
 
 # the quad's left edge -(16/9)/aspect (-1 - [ebp-0x6c], [ebp-0x6c] = (H x 16/9 - H x aspect) / its width), its
 # right edge (16/9)/aspect ([ebp-0x44], [ebp-0x30]: their stores below skipped)
