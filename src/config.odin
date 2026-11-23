@@ -12,6 +12,10 @@ package xrc
 //                                 many it leaves there
 //   patched ADDR [LEN]            read-only data the runtime writes (LEN bytes, default 4): not folded into the
 //                                 code as a constant (x_rdata_fold)
+//   patch ADDR HEX...             the image's bytes at ADDR replaced before anything is decoded (a mod's hooks:
+//                                 hex bytes, spaces between them allowed). Within a section's file bytes they are
+//                                 written there; anywhere else they are new code (what a hook jumps to), a section
+//                                 of its own (data_patch.odin)
 //
 // Without the file (or without --override) there are none of these: every call is a plain call.
 
@@ -22,6 +26,9 @@ import "core:strings"
 cfg_prologs: map[u32]bool
 cfg_epilogs: map[u32]bool
 cfg_x87: [dynamic][3]u32 // address, values taken, values returned
+cfg_patches: [dynamic]Cfg_Patch
+
+Cfg_Patch :: struct {addr: u32, bytes: []u8, line: int}
 
 config_load :: proc(path: string) -> bool {
 	txt, ok := read_text(path)
@@ -51,6 +58,18 @@ config_load :: proc(path: string) -> bool {
 			if len(f) == 3 {l, okl = strconv.parse_uint(f[2], 10)}
 			if !oka || !okl {bad = true; break}
 			append(&exe.no_fold, [2]u32{a, a + u32(l)})
+		case "patch":
+			if len(f) < 3 {bad = true; break}
+			a, oka := hex_u32(f[1])
+			hx := strings.concatenate(f[2:], context.temp_allocator)
+			if !oka || len(hx) % 2 != 0 {bad = true; break}
+			b := make([]u8, len(hx) / 2)
+			for k in 0 ..< len(b) {
+				v, okv := strconv.parse_uint(hx[2 * k:2 * k + 2], 16)
+				if !okv {bad = true; break}
+				b[k] = u8(v)
+			}
+			if !bad {append(&cfg_patches, Cfg_Patch{a, b, n + 1})}
 		case:
 			bad = true
 		}

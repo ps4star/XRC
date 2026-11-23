@@ -422,7 +422,7 @@ rx_function :: proc(a: u32, size: u32, alloc := context.allocator) -> (out: [dyn
 	in_body :: proc(pc, a, size: u32, chunk: bool) -> bool {
 		if pc >= a && pc < a + size {return true}
 		if !chunk || pc < exe.text_lo || pc >= exe.text_hi {return false}
-		return !(pc in funcs)
+		return !(pc in funcs) || pc in x_jump_chunk // (a jump-only function: the jumper's own code, x_jump_chunk)
 	}
 	for len(work) > 0 {
 		pc := pop(&work)

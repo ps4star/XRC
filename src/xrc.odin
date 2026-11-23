@@ -88,6 +88,13 @@ x_direct_ok: map[u32]bool
 // "fast" overrides (overrides.tsv): a hand-written xo_<addr> in the runtime replaces the function; translated as
 // usual (the reference it is checked against), but direct calls go to xo_<addr>
 x_fast: map[u32]bool
+// Jump-only functions (x_jump_chunk_plan): map entries that no direct call targets. A direct jmp / jcc to one is
+// followed as part of the function jumping there (a chunk: rx_function), never translated as a tail call into it -- a
+// tail call assumes the stack holds nothing of the jumper's but the return address, which code only ever jumped to
+// need not (00c3ff18: 00c3fd40's shared epilogue, its pops and ret: "returned to ..., not to its caller"). The copy
+// is exact whatever the stack holds; the function is still translated on its own too, for its address's other uses.
+x_called: map[u32]bool
+x_jump_chunk: map[u32]bool
 x_direct_used: map[u32]bool
 x_direct_mu: sync.Mutex // (the translation runs on several threads: x_par_run)
 // the callee-saved registers each function keeps for its caller (x_abi_plan): bit 0 ebx, 1 esi, 2 edi, 3 ebp. A
@@ -2044,6 +2051,7 @@ cmd_xrc :: proc(args: []string) -> int {
 	}
 	if EXE_PATH == "" {fmt.eprintln("xrc: --exe FILE is required"); return 2}
 	if !load_exe(EXE_PATH) {return 2}
+	if !apply_patches() {return 2}
 	if !load_tables() {return 2}
 	lap(x_timing, &t_last, "load exe + tables")
 	addrs := make([dynamic]u32)
@@ -2099,6 +2107,7 @@ cmd_xrc :: proc(args: []string) -> int {
 			fmt.printf("xrc: %d byte-matched functions called through the dispatcher\n", nm)
 		}
 	}
+	if all {x_jump_chunk_plan(addrs[:], covered, wrapped)} else {x_jump_chunk = make(map[u32]bool)}
 	x_abi_plan(addrs[:], funcs)
 	lap(x_timing, &t_last, "callee-saved registers")
 	x_stack_plan(addrs[:], funcs)
@@ -2334,6 +2343,7 @@ x_discover_entries :: proc() -> [dynamic]u32 {
 	// called funclet inside or after its function), even where another function's code also reaches them
 	calls := make(map[u32]bool)
 	todo := make([dynamic]u32)
+	if x_called == nil {x_called = make(map[u32]bool)}
 	append(&todo, ..fstarts[:])
 	for len(todo) > 0 {
 		// (decoded on every core: x_disc_one; merged in this order, the switch tables as one thread would have left them)
@@ -2344,7 +2354,7 @@ x_discover_entries :: proc() -> [dynamic]u32 {
 		for &r in x_disc_res {
 			for v in r.covered {if v >= exe.text_lo && v < exe.text_hi {o := v - exe.text_lo; covered[o >> 6] |= 1 << (o & 63)}}
 			for v in r.ends {ends[v] = true}
-			for v in r.calls {calls[v] = true}
+			for v in r.calls {calls[v] = true; x_called[v] = true}
 			for v in r.refs {if v >= exe.text_lo && v < exe.text_hi {refs[v] = true}}
 			for k, v in r.slots {
 				if old, had := rx_table_slots[k]; had {delete(old)}
@@ -2669,4 +2679,17 @@ x_write_image_facts :: proc(tb: ^strings.Builder) {
 		nh += 1
 	}
 	fmt.sbprintf(tb, "}};\nconst unsigned xrc_nhash_ranges = %d;\nconst unsigned long long xrc_data_hash = 0x%016xull;\n", nh, h)
+}
+
+// x_jump_chunk: see x_called. Not a hand-written, wrapped, fast or byte-matched function (its replacement must run,
+// not a copy of its original code). Opt-in for now (XRC_JUMP_CHUNK=1, not yet played with): off, every jump to a
+// function start is a tail call, as before.
+x_jump_chunk_plan :: proc(addrs: []u32, covered: map[u32]string, wrapped: map[u32]bool) {
+	x_jump_chunk = make(map[u32]bool)
+	if os.get_env("XRC_JUMP_CHUNK", context.temp_allocator) != "1" {return}
+	for a in addrs {
+		if a in x_called || a in covered || a in wrapped || a in x_fast || !(a in x_direct_ok) {continue}
+		x_jump_chunk[a] = true
+	}
+	fmt.printf("xrc: %d functions only ever jumped to (no direct call): a jump to one is followed as the jumper's own code\n", len(x_jump_chunk))
 }

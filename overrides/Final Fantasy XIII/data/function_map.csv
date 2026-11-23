@@ -31010,8 +31010,7 @@ address,name,size,thunk,size_source
 00c3fa00,FUN_00c3fa00,32,0,gap
 00c3fa20,FUN_00c3fa20,304,0,gap
 00c3fb50,FUN_00c3fb50,496,0,gap
-00c3fd40,FUN_00c3fd40,472,0,gap
-00c3ff18,FUN_00c3ff18,40,0,gap
+00c3fd40,FUN_00c3fd40,500,0,fixed
 00c3ff40,FUN_00c3ff40,224,0,gap
 00c40020,FUN_00c40020,1216,0,gap
 00c404e0,FUN_00c404e0,1168,0,gap

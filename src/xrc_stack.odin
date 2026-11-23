@@ -52,6 +52,7 @@ X_Stk_Fn :: struct {
 	ops:   []X_Stk_Op,
 	succ:  []i32, // CSR: succ[start[k] ..< start[k+1]]
 	start: []i32,
+	addr:  []u32, // (each op's instruction: the audit's reports)
 	ok:    bool,  // decoded
 }
 
@@ -168,6 +169,7 @@ stk_decode :: proc(a, size: u32) -> (f: X_Stk_Fn) {
 	idx := make(map[u32]i32, n, context.temp_allocator)
 	for &i, k in ins {idx[i.addr] = i32(k)}
 	ops := make([]X_Stk_Op, n)
+	addrs := make([]u32, n)
 	succ := make([dynamic]i32, 0, n * 2)
 	start := make([]i32, n + 1)
 	for &i, k in ins {
@@ -201,10 +203,11 @@ stk_decode :: proc(a, size: u32) -> (f: X_Stk_Fn) {
 				op = {k = .Fail}
 			}
 		}
+		addrs[k] = i.addr
 		ops[k] = op
 	}
 	start[n] = i32(len(succ))
-	return {ops = ops, succ = succ[:], start = start, ok = true}
+	return {ops = ops, succ = succ[:], start = start, addr = addrs, ok = true}
 }
 
 // the N of function fi from the callee Ns of the last round
@@ -303,7 +306,8 @@ x_stack_plan :: proc(addrs: []u32, funcs: map[u32]u32) {
 	for a, i in addrs {
 		if stk_prev[i] != X_STK_UNK {x_stk_n[a] = stk_prev[i]; n += 1}
 	}
-	for &f in stk_fns {delete(f.ops); delete(f.succ); delete(f.start)}
+	stk_audit_all()
+	for &f in stk_fns {delete(f.ops); delete(f.succ); delete(f.start); delete(f.addr)}
 	delete(stk_fns); delete(stk_prev); delete(stk_next); delete(stk_idx); delete(stk_elig)
 	fmt.printf("xrc: %d of %d functions return with the stack balanced (ret N; %d rounds): direct calls to them keep esp\n", n, len(addrs), rounds)
 }
@@ -315,4 +319,107 @@ x_post_call :: proc(xl: ^Xlat, target: u32, ra: u32) -> string {
 		return fmt.tprintf("   %s r_esp = x_s_ + 0x%xu; MX32(x_s_ - 4) = 0x%xu;", chk, u32(nn), ra)
 	}
 	return fmt.tprintf("    if (r_esp >= x_s_) MX32(x_s_ - 4) = 0x%xu;", ra)
+}
+
+// The stack audit (every function, after the rounds above; XRC_STACK_AUDIT=FILE writes the findings there): code the
+// function map calls a function that is not one. A function's esp is known to be off its entry value (data of its own
+// still on the stack) where it
+//   - jumps to another function's start (a jmp, or a jcc's taken edge): that target uses this frame -- a shared
+//     epilogue or a later part of this function, translated as a tail call into a function of its own, which then
+//     returns with the wrong return address (00c3ff18: 00c3fd40's tail, its pops and ret, "returned to ..., not to
+//     its caller", 2026-11-22);
+//   - returns (ret) with esp above the entry: it popped what it never pushed -- itself the frame-sharing tail of
+//     another function, listed as one.
+// Every finding is a map entry to fix (the size of the function it belongs to, the false entry removed). Its offsets
+// are only those the data flow knows (a call with an unknown N, an alignment, alloca: unknown from there on), so
+// "none found" is not a proof, but every finding is real.
+@(private = "file")
+stk_audit_fn :: proc(fi: int, out: ^[dynamic]string) {
+	f := &stk_fns[fi]
+	if !f.ok || len(f.ops) == 0 {return}
+	n := len(f.ops)
+	esp := make([]i32, n)
+	ebp := make([]i32, n)
+	seen := make([]bool, n)
+	work := make([dynamic]i32, 0, 64)
+	said := make(map[u32]bool)
+	defer {delete(esp); delete(ebp); delete(seen); delete(work); delete(said)}
+	esp[0], ebp[0], seen[0] = 0, X_STK_UNK, true
+	append(&work, 0)
+	add :: proc(v, d: i32) -> i32 {return v == X_STK_UNK ? X_STK_UNK : v + d}
+	a := stk_addrs[fi]
+	for len(work) > 0 {
+		k := pop(&work)
+		e, b := esp[k], ebp[k]
+		op := f.ops[k]
+		at := f.addr[k]
+		tgt_fn := op.tgt in stk_idx
+		if (op.tail || op.k == .Tail) && tgt_fn && e != X_STK_UNK && e != 0 && !(at in said) {
+			said[at] = true
+			append(out, fmt.aprintf("%08x: %08x jumps to %08x with esp at %+d from its entry (its own data on the stack): %08x is its code, not a function", at, a, op.tgt, e, op.tgt))
+		}
+		switch op.k {
+		case .None:
+		case .Adj: e = add(e, op.arg)
+		case .Esp_Unk: e = X_STK_UNK
+		case .Ebp_Unk: b = X_STK_UNK
+		case .Both_Unk: e, b = X_STK_UNK, X_STK_UNK
+		case .Ebp_Esp: b = add(e, op.arg)
+		case .Esp_Ebp: e = add(b, op.arg)
+		case .Leave: e, b = add(b, 4), X_STK_UNK
+		case .Pop_Ebp: e, b = add(e, op.arg), X_STK_UNK
+		case .Ebp_Adj: b = add(b, op.arg)
+		case .Call:
+			nn := X_STK_UNK
+			if j, ok := stk_idx[op.tgt]; ok {nn = stk_prev[j]}
+			e = nn == X_STK_UNK ? X_STK_UNK : add(e, nn)
+		case .Ret:
+			if e != X_STK_UNK && e > 0 && !(at in said) {
+				said[at] = true
+				append(out, fmt.aprintf("%08x: %08x returns with esp at %+d from its entry (it popped what it never pushed): another function's tail, not a function", at, a, e))
+			}
+		case .Tail, .Fail:
+		}
+		if op.k == .Ret || op.k == .Tail || op.k == .Fail {continue}
+		for s in f.succ[f.start[k]:f.start[k + 1]] {
+			if !seen[s] {
+				esp[s], ebp[s], seen[s] = e, b, true
+				append(&work, s)
+				continue
+			}
+			ne, nb := esp[s], ebp[s]
+			if ne != e {ne = X_STK_UNK}
+			if nb != b {nb = X_STK_UNK}
+			if ne != esp[s] || nb != ebp[s] {
+				esp[s], ebp[s] = ne, nb
+				append(&work, s)
+			}
+		}
+	}
+}
+
+@(private = "file")
+stk_audit_all :: proc() {
+	found := make([dynamic]string)
+	// (every function's N this time, not only the translated code's: the offsets known past more calls; x_stk_n is
+	// already taken, so this changes nothing of the translation)
+	for &e in stk_elig {e = true}
+	for r := 0; r < 64; r += 1 {
+		x_par_run(len(stk_addrs), proc(i: int) {stk_next[i] = stk_eval(i)})
+		changed := 0
+		for i in 0 ..< len(stk_addrs) {if stk_next[i] != stk_prev[i] {changed += 1}}
+		stk_prev, stk_next = stk_next, stk_prev
+		if changed == 0 {break}
+	}
+	for _, i in stk_addrs {
+		stk_audit_fn(i, &found)
+	}
+	fmt.printf("xrc: stack audit: %d places where code the map calls a function uses its caller's frame%s\n", len(found), len(found) > 0 ? " (XRC_STACK_AUDIT=FILE: the list)" : "")
+	if path := os.get_env("XRC_STACK_AUDIT", context.temp_allocator); path != "" {
+		b: [dynamic]u8
+		for s in found {append(&b, ..transmute([]u8)s); append(&b, '\n')}
+		_ = os.write_entire_file(path, b[:])
+	}
+	for s in found {delete(s)}
+	delete(found)
 }

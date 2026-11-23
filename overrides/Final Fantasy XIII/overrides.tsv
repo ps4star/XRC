@@ -78,7 +78,6 @@
 00455840	fast	Vec4::operator= (ovr_simd.c)
 00455880	fast	Vec4::Get (ovr_simd.c)
 004586c0	fast	Aabb::Extended (ovr_simd.c)
-00906430	fast	perspective projection: the minimap's Hor+ at wider than 16:9 (ovr_game.c)
 00710860	fast	Vec4::Dot4 (ovr_simd.c)
 00711f40	fast	Matrix33::Transform (ovr_simd.c)
 00455f00	fast	Matrix44::Transform(m128) (ovr_simd.c)
