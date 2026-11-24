@@ -43,6 +43,29 @@ unsigned long long xrc_acquire_wait_us; /* the main thread's time waiting for a 
 double xrc_gpu_busy_ms_total; /* the GPU busy (its command buffers' spans, overlaps once: vk_d3d9.c), ms so far */
 double xrc_rt_work_ms;        /* the render thread replaying commands (vk_cs.h), ms so far */
 double xrc_gpu_ms_total = -1; /* the GPU's time on the frames so far, in ms (the fps report); -1: not measured (vk_d3d9.c) */
+#ifdef XRC_FRAME_LIMIT
+/* Vsync pacing (2026-11-24, XRC_FRAME_LIMIT=60): when the display alone paces the frames -- the swap chain presents
+ * with FIFO (each frame waits for its vertical blank) and keeps one frame queued at most (present wait, or a swap chain
+ * of 3 images at most: the acquire then waits until the frame before is on the screen, the moment present wait waits
+ * for; vk_d3d9.c xrc_vk_vsync), into a window shown, on a display whose mode runs at 59-61 Hz (xrc_display_hz), with
+ * the game's own target at 60 -- the limiter holds nothing: a frame waiting is released at once and the present's
+ * vsync sets the pace. The limiter's own release timing (locked to the counted vertical blanks, on an exact schedule)
+ * is not used then: under variable refresh (G-Sync, FreeSync: Windows' independent flip) the blanks follow the frames,
+ * and a schedule made from their measured rate could drift under 60 -- a smooth ~57 fps for a second or two in battle
+ * (PresentMon, 2026-11-24). Otherwise the limiter as before: no FIFO, a longer queue (more than 3 images without
+ * present wait), 120 / 144 Hz modes, a 30 limit, the game's own target under 60. And frames coming faster than 66 a
+ * second are not paced by vsync (the driver's "vertical sync: off" overrides FIFO): the limiter then, until a new swap
+ * chain or the window shown again. XRC_VSYNC_PACE=0: the limiter always.
+ * The release is made as the frame wait starts (its frame-time stamp, which steps the logic, then right after the
+ * present that waited for the vertical blank: steady 1/60 s apart). The idle work (loading) had the time until the
+ * release; now it gets the frame's slack instead: the period less the main thread's work a frame (from one frame wait
+ * to the next, less its time blocked presenting) and 2 ms for the GPU (xo_00e8d5a0). */
+static int vs_on;                  /* vsync pacing now (vsync_pace decides it at each release check) */
+static unsigned long long vs_work; /* the main thread's work a frame, us (m_frame_wait: up by half the difference, down by
+                                    * 1/8; a frame counts as at most a period + 2 ms, so one hitch does not starve the next ones) */
+static int vs_in_wait;             /* the idle callback running in the frame wait: the budget applies (elsewhere the original) */
+static int vs_frame;               /* this frame released by vsync pacing (presented since the last one): the budget applies */
+#endif
 static int idle_new;
 void xrc_idle_begin(void) { idle_new = 1; }
 void XRC_CC xo_00e8d5a0(XCtx *c) {
@@ -78,6 +101,17 @@ void XRC_CC xo_00e8d5a0(XCtx *c) {
 #ifndef XRC_NO_TOOLS
 	if (idiag) { id_calls++; if (now == idle_t0 && (c->eax & 0xffu)) id_due0++; }
 #endif
+#ifdef XRC_FRAME_LIMIT
+	if (vs_on && vs_in_wait && vs_frame) { /* (vsync pacing: due once the frame's slack is used -- the release, made at the wait's start, says nothing.
+	              * A frame that misses its refresh anyway -- the main thread's work alone a period or more: a slow machine --
+	              * has XRC_MIN_IDLE_MS, so loading never starves; one that fits keeps its refresh: half a ms at least) */
+		unsigned long long p = 1000000ull / XRC_FRAME_LIMIT, b = p > vs_work + 2000ull ? p - vs_work - 2000ull : 0;
+		if (vs_work >= p) { if (b < min_us) b = min_us; }
+		else if (b < 500ull) b = 500ull;
+		c->eax = (c->eax & ~0xffu) | (now - idle_t0 >= b ? 1u : 0u);
+		return;
+	}
+#endif
 	if ((c->eax & 0xffu) && now - idle_t0 < min_us) c->eax = 0;
 }
 
@@ -87,6 +121,61 @@ unsigned long long xrc_vblank_count(double *hz);
 #if XRC_FRAME_LIMIT != 30 && XRC_FRAME_LIMIT != 60
 #error "XRC_FRAME_LIMIT: 30 or 60"
 #endif
+/* vsync pacing (above): decided at each release check; 1: paced by vsync -- a frame waiting released at once */
+static int vsync_pace(XCtx *c, u32 self, unsigned long long period, unsigned long long *last_rel) {
+	static int env = -1, why_was = -1;
+	static unsigned long long win_at, win_n;
+	static int off; /* (vsync found not pacing: until a new swap chain or the window shown again) */
+	static unsigned seen_gen = ~0u, seen_shown = ~0u, seen_pf;
+	extern unsigned xrc_swap_gen, xrc_swap_shown;
+	extern int xrc_vk_vsync, xrc_display_hz;
+	unsigned long long now = xrc_qpc();
+	int why = 0;
+	if (env < 0) { const char *e = getenv("XRC_VSYNC_PACE"); env = !(e && e[0] == '0'); }
+	if (seen_gen != xrc_swap_gen || seen_shown != xrc_swap_shown) { seen_gen = xrc_swap_gen; seen_shown = xrc_swap_shown; off = 0; win_at = 0; }
+	if (!env) why = 1;
+	else if (XRC_FRAME_LIMIT != 60) why = 2;
+	else if (!xrc_vk_vsync) why = 3;
+	else if (xrc_display_hz < 59 || xrc_display_hz > 61) why = 4;
+	else if (period > 10000000ull / 58ull) why = 5;
+	else if (off) why = 6;
+	vs_on = !why;
+	if (why != why_was) {
+		why_was = why;
+		if (!why) { extern int xrc_vk_present_wait; xrc_log("xrc: frame limiter: not holding frames -- the display's vsync paces them (FIFO, %s, %d Hz)\n", xrc_vk_present_wait ? "present wait" : "3 swap chain images", xrc_display_hz); }
+		else xrc_log("xrc: frame limiter: on (%s)\n", why == 1 ? "XRC_VSYNC_PACE=0" : why == 2 ? "a 30 fps limit" :
+		             why == 3 ? "no FIFO present with one frame queued at most, or the window not shown" : why == 4 ? "the display not at 60 Hz" :
+		             why == 5 ? "the game's own rate under 60" : "vsync not pacing the frames");
+	}
+	if (!vs_on) return 0;
+	if (M32(self + 0x40) == 0xffffffffu) {
+		extern unsigned xrc_vk_vsync_frames;
+		int presented = xrc_vk_vsync_frames != seen_pf;
+		/* (no frame presented since the last release -- loading that draws nothing: no vsync to pace it, the period; its
+		 * idle work then has the time until the release, as with the limiter) */
+		if (!presented && *last_rel && now + 10000ull < *last_rel + period) { vs_frame = 0; return 1; }
+		vs_frame = presented;
+		if (presented) {
+			seen_pf = xrc_vk_vsync_frames;
+			/* (the rate, over half-second windows: over 66 a second, vsync is not pacing them) */
+			if (!win_at) { win_at = now; win_n = 0; }
+			else win_n++;
+		}
+		if (win_at && now - win_at >= 5000000ull) {
+			double fps = (double)win_n * 1e7 / (double)(now - win_at);
+			win_at = 0;
+			if (fps > 66.0) {
+				off = 1;
+				xrc_log("xrc: frame limiter: %.0f fps with vsync -- it is not pacing the frames (a driver setting?): the limiter\n", fps);
+			}
+		}
+		*last_rel = now;
+		xrc_call_guest(c, 0x00e8d3c0u, 0, 0);
+		M32(self + 0x40) = 0;
+	}
+	return 1;
+}
+static int tr_main; /* (try_release called by the main thread, from its frame wait: the diagnostic) */
 /* 00e8d220 (thiscall, no arguments): the pacer's tick */
 /* the release when due: from the pacer's 1 ms tick, and from the main thread as it starts to wait (00e8d560), so a
  * frame that is already late goes on at once instead of at the next tick (~1 ms a frame otherwise) */
@@ -107,6 +196,7 @@ static void try_release(XCtx *c, u32 self) {
 	 * benchmark of what a frame costs (the game's logic steps by whole 1/60 s ticks: it may then run fast or slow) */
 	if (unlock_at && xrc_now_us() >= unlock_at) period = 0;
 	if (!said) { said = 1; fprintf(stderr, "xrc: XRC_FRAME_LIMIT: frames at up to %d fps, not snapped\n", XRC_FRAME_LIMIT); }
+	if (period && vsync_pace(c, self, period, &last_rel)) return;
 	/* locked to the display's refresh (vblank.c), when it runs at a whole multiple of the rate (60 Hz at 60, 120 at
 	 * 60 ...: every k-th vertical blank): each frame released at a vertical blank -- one clock, not two drifting
 	 * apart. Else (144 Hz, not measured yet, XRC_VSYNC_LOCK=0) the limiter's own clock. */
@@ -235,6 +325,22 @@ static void try_release(XCtx *c, u32 self) {
 		unsigned long long due = last_rel + period;
 		now = xrc_qpc();
 		if (!last_rel || now + 10000ull >= due) {
+#ifndef XRC_NO_TOOLS
+			{ /* (XRC_HITCH_MS: the own clock's releases every 2 s -- the period, how late, how often the schedule restarted) */
+				static int od = -1;
+				static unsigned long long o_at, o_n, o_late, o_re, o_main;
+				if (od < 0) od = getenv("XRC_HITCH_MS") != 0;
+				if (od && last_rel) {
+					o_n++; o_late += now > due ? now - due : 0; o_re += now > due + 10000ull; o_main += tr_main;
+					if (!o_at) o_at = now;
+					if (now - o_at > 20000000ull) {
+						fprintf(stderr, "xrc: frame limiter: own clock: period %.3f ms, %llu releases, %.3f ms late on average, %llu restarts, %llu by the main thread\n",
+						        (double)period / 1e4, o_n, (double)o_late / 1e4 / (double)o_n, o_re, o_main);
+						o_at = now; o_n = o_late = o_re = o_main = 0;
+					}
+				}
+			}
+#endif
 			last_rel = !last_rel || now > due + 10000ull ? now : due;
 			xrc_call_guest(c, 0x00e8d3c0u, 0, 0);
 			M32(self + 0x40) = 0;
@@ -251,6 +357,14 @@ static void XRC_CC m_frame_wait(XCtx *c) {
 	if (!orig) orig = xrc_translation_of(0x00e8d560u);
 	if (!orig) xrc_fatal(c, "XRC_FRAME_LIMIT: no translation of 00e8d560");
 	unsigned long long t0 = xrc_now_us();
+	static unsigned long long fw_end, fw_blk0; /* (the last frame wait's end; the time blocked presenting then) */
+	extern unsigned long long xrc_present_block_us;
+	if (fw_end && t0 > fw_end) { /* (vsync pacing: the main thread's work since the last frame wait, less its time blocked presenting) */
+		unsigned long long w = t0 - fw_end, b = xrc_present_block_us - fw_blk0;
+		w = w > b ? w - b : 0;
+		if (w > 1000000ull / XRC_FRAME_LIMIT + 2000ull) w = 1000000ull / XRC_FRAME_LIMIT + 2000ull;
+		vs_work = w >= vs_work ? vs_work + (w - vs_work + 1) / 2 : vs_work - (vs_work - w) / 8;
+	}
 	u32 self = c->ecx, cb = M32(self + 0x38);
 	/* 00e8d560: the idle callback ([this+0x38]) once, then the wait on the release semaphore. The callback does its
 	 * work (loading) only while the frame is not released yet -- released first (it was due already), it did nothing.
@@ -260,12 +374,17 @@ static void XRC_CC m_frame_wait(XCtx *c) {
 	 * meanwhile when due; xo_00e8d5a0 keeps it working its minimum), then the release, then the wait (without the
 	 * callback a second time). */
 	xrc_idle_begin();
+	if (vs_on) { try_release(c, self); c->ecx = self; } /* (vsync pacing: released as the wait starts; the idle work has its budget) */
+	vs_in_wait = 1;
 	if (cb) {
 		c->ecx = self;
 		xrc_call_guest(c, cb, 0, 0);
 		c->ecx = self;
 	}
+	vs_in_wait = 0;
+	tr_main = 1;
 	try_release(c, self);
+	tr_main = 0;
 	if (cb) M32(self + 0x38) = 0;
 	c->ecx = self;
 	{
@@ -277,6 +396,7 @@ static void XRC_CC m_frame_wait(XCtx *c) {
 	}
 	if (cb && !M32(self + 0x38)) M32(self + 0x38) = cb;
 	xrc_frame_wait_us += xrc_now_us() - t0;
+	fw_end = xrc_now_us(); fw_blk0 = xrc_present_block_us;
 }
 const XrcManual xrc_manual_game[] = {
 	{0x00e8d220u, m_pacer_tick, "frame pacer tick (XRC_FRAME_LIMIT)"},
