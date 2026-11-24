@@ -93,6 +93,7 @@ unsigned long long xrc_vblank_count(double *hz);
 static void try_release(XCtx *c, u32 self) {
 	static int said;
 	static unsigned long long last_rel;
+	static unsigned long long last_due; /* (locked: when the last frame was due on the exact 1/rate schedule) */
 	float fps;
 	unsigned long long period = 10000000ull / XRC_FRAME_LIMIT, now;
 	static unsigned long long unlock_at = 1; /* (1: not read yet; 0: never) */
@@ -182,7 +183,19 @@ static void try_release(XCtx *c, u32 self) {
 			}
 			/* (and never sooner than a refresh period minus 2 ms after the last release, k refreshes a frame: a vertical
 			 * blank counted twice must not release two frames in one refresh -- the queue then fills for good) */
-			if (waiting && vb >= last_vb + need && (!last_rel || now_q - last_rel + 20000ull >= (unsigned long long)(1e7 * (double)need / hz))) {
+			/* (and never before its time on the exact schedule, 1/rate apart -- variable refresh (FreeSync, G-Sync: the
+			 * window focused, Windows' independent flip) refreshes the display when a frame arrives, so the vertical blanks
+			 * follow the frames: locked to them alone, the frames ran ahead, the rate measured from those blanks rose with
+			 * them until it fell out of the lock's 3% (2026-11-23, PresentMon: 57-66 fps in a 4 s cycle, smooth unfocused).
+			 * With a fixed refresh the blanks come at that time anyway; on time, the schedule is kept (a frame let go up to
+			 * 1 ms early by the tick does not move it), late by over 2 ms it starts again from then) */
+			/* (the schedule follows the measured refresh -- a fixed display a little over the rate keeps its own pace --
+			 * but never over 0.2% faster than the rate: under variable refresh that measure follows the frames) */
+			double hz_cap = (double)k * 1e7 / (double)period * 1.002;
+			unsigned long long sched = (unsigned long long)(1e7 * (double)need / (hz < hz_cap ? hz : hz_cap));
+			if (waiting && vb >= last_vb + need && (!last_rel || now_q - last_rel + 20000ull >= (unsigned long long)(1e7 * (double)need / hz)) &&
+			    (!last_due || now_q + 10000ull >= last_due + sched)) {
+				last_due = !last_due || now_q > last_due + sched + 20000ull ? now_q : last_due + sched;
 				after_stall = !why && last_rel && now_q - last_rel > 1000000ull && now_q - drained_at > 20000000ull;
 				{
 					unsigned long long aw = xrc_acquire_wait_us - aw_last;
