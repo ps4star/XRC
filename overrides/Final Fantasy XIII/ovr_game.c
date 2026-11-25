@@ -398,13 +398,124 @@ static void XRC_CC m_frame_wait(XCtx *c) {
 	xrc_frame_wait_us += xrc_now_us() - t0;
 	fw_end = xrc_now_us(); fw_blk0 = xrc_present_block_us;
 }
+#endif
+
+/* Boosters (the launcher's Features & Mods > Boosters: the .cfg's XRC_BOOST_*, read at the first call; every build):
+ *   XRC_BOOST_SPEED=2|4|8  the game logic's step x N. The main loop takes the last frame's time (00e8d490 at 00e8a3b3:
+ *                          1/300000 s units, rounded to whole 1/60 s ticks), clamps it (the fps limits, a fixed step)
+ *                          and runs the update phases with it -- 00e8b910(UPDATE_BEGIN, UPDATE_END, &step) at 00e8a652,
+ *                          then the INTERVAL ones with the same step (the phase names: the table at 02667d98). x N
+ *                          there: each frame steps N frames' worth -- battles, the field, scenes in the engine. (The
+ *                          sound manager's phase, 00e8a73d with 00e8d490's time from 00e8a6f2, keeps the real time; the
+ *                          movies and the frame rate are their own.)
+ *   XRC_BOOST_STATS=1      the party's battle max HP, Strength and Magic at their highest (99,999 / 9,999 / 9,999):
+ *                          the effective values of a battle character's parameters (004b8270, below), on the party's
+ *                          side. The battle's copy only: the Crystarium's stats and the Status menu are unchanged.
+ *   XRC_BOOST_GIL=1        999,999,999 gil (the game's own cap, 00b6c620): [[0282b230] + 0x2578], set each frame.
+ *   XRC_BOOST_ONE_HIT=1    an enemy losing HP loses all of it: 0046e6b0 (a battle character's HP + delta, clamped to its
+ *                          floor +0x29c and its max) with delta < 0 on the enemy side (+0x270 bits 12..15: 1, 5 or 7, as
+ *                          0046dcf0) takes -0x3fffffff -- the floor still holds (an enemy a scene needs alive).
+ *   XRC_BOOST_LOG=1        (tools builds) each HP change, the parameter recomputes and the step (each 600th), logged */
+static int bst_ready, bst_speed = 1, bst_stats, bst_gil, bst_one_hit, bst_log;
+static unsigned bst_from; /* (tools: XRC_BOOST_FROM=frames -- the game speed from that many logic updates on, for tests) */
+static void bst_read(void) {
+	const char *e;
+	if (bst_ready) return;
+	e = getenv("XRC_BOOST_SPEED");
+	if (e && (atoi(e) == 2 || atoi(e) == 4 || atoi(e) == 8)) bst_speed = atoi(e);
+	bst_stats = (e = getenv("XRC_BOOST_STATS")) != 0 && e[0] == '1';
+	bst_gil = (e = getenv("XRC_BOOST_GIL")) != 0 && e[0] == '1';
+	bst_one_hit = (e = getenv("XRC_BOOST_ONE_HIT")) != 0 && e[0] == '1';
+	bst_log = xrc_tool_env("XRC_BOOST_LOG") != 0;
+	if ((e = xrc_tool_env("XRC_BOOST_FROM")) != 0) bst_from = (unsigned)atoi(e);
+	if (bst_speed > 1 || bst_stats || bst_gil || bst_one_hit)
+		xrc_log("xrc: boosters: game speed %d00%%%s%s%s\n", bst_speed, bst_stats ? ", max stats" : "", bst_gil ? ", max gil" : "",
+		        bst_one_hit ? ", one-hit kills" : "");
+	bst_ready = 1;
+}
+/* a battle character's side (+0x270 bits 12..15, signed) and party slot (bits 4..7, signed; -1: none), as the game takes them */
+static int bst_side(u32 ch) { return (s32)(M32(ch + 0x270) << 16) >> 28; }
+static int bst_slot(u32 ch) { return (s32)(M32(ch + 0x270) << 24) >> 28; }
+/* 00e8b910 (cdecl (first, last, &step)): the game's update phases first .. last with the step -- at the main loop's
+ * logic update (the call at 00e8a652) the step x XRC_BOOST_SPEED (the INTERVAL phases after it, 00e8a6af, get the same
+ * step); the gil there (once a frame). The play time ([[0282b230] + 0x2580], the same units: it adds the step) keeps
+ * the real time: a call that added the step x N to it gets the real step added instead. */
+static void XRC_CC bst_update(XCtx *c) {
+	static XFn orig;
+	static s32 real;
+	u32 ra = M32(c->esp), stp = M32(c->esp + 12), b, pt = 0;
+	if (!orig) orig = xrc_translation_of(0x00e8b910u);
+	bst_read();
+	if (ra == 0x00e8a657u) {
+		static unsigned nlog, nupd;
+		int n = nupd < bst_from ? (nupd++, 1) : bst_speed;
+		real = (s32)M32(stp);
+		if (bst_log && (nlog++ % 600) == 0) xrc_log("xrc: boost: step %d x %d\n", real, n);
+		if (n > 1) M32(stp) = (u32)(real * n);
+		if (bst_gil) {
+			b = M32(0x0282b230u);
+			if (b && M32(b + 0x2578) != 999999999u) M32(b + 0x2578) = 999999999u;
+		}
+	}
+	if (bst_speed <= 1 || (ra != 0x00e8a657u && ra != 0x00e8a6b4u) || (s32)M32(stp) != real * bst_speed || !(b = M32(0x0282b230u))) {
+		orig(c);
+		return;
+	}
+	pt = M32(b + 0x2580);
+	orig(c);
+	if (M32(0x0282b230u) == b && M32(b + 0x2580) - pt == (u32)(real * bst_speed)) M32(b + 0x2580) = pt + (u32)real;
+}
+/* 0046e6b0 (thiscall (delta), ret 4): a battle character's HP + delta (returns the change made) */
+static void XRC_CC bst_add_hp(XCtx *c) {
+	static XFn orig;
+	u32 ch = c->ecx, d = M32(c->esp + 4);
+	int side = bst_side(ch);
+	if (!orig) orig = xrc_translation_of(0x0046e6b0u);
+	bst_read();
+	if (bst_one_hit && (s32)d < 0 && ((1u << (side & 31)) & 0xa2u)) M32(c->esp + 4) = 0xc0000001u;
+	if (bst_log)
+		xrc_log("xrc: boost: hp %08x side %d slot %d: %d %+d (max %d, floor %d)\n", ch, side, bst_slot(ch), (s32)M32(ch + 0x290),
+		        (s32)M32(c->esp + 4), (s32)M32(ch + 0x6c8), (s32)M32(ch + 0x29c));
+	orig(c);
+}
+/* 004b8270 (thiscall (idx), ret 4): a battle character's parameter set (chara + 0x2c4: pages of 64 dwords, page 4 the
+ * effective values; its character at +0x688) recomputes parameter idx's effective value (004b84b0, to +0x400 + idx * 4)
+ * -- each change of a base value or a modifier (004b52f0) does. After it, on the party's side (the character's +0x270
+ * bits 12..15: 0 or 3, as 0046d8d0): max HP (1) 99,999 -- the HP with it, when they were at the old maximum --,
+ * Strength (5) and Magic (6) 9,999 (kept x 100 there: 999,900; their limits, 004b84b0's table 010a2950 by the type
+ * 010a2850[idx], are 1 .. 2^31 - 1) */
+static void XRC_CC bst_param(XCtx *c) {
+	static XFn orig;
+	u32 ps = c->ecx, idx = M32(c->esp + 4), ch, was, maxv;
+	int side;
+	if (!orig) orig = xrc_translation_of(0x004b8270u);
+	bst_read();
+	if ((!bst_stats && !bst_log) || (idx != 1 && idx != 5 && idx != 6) || !(ch = M32(ps + 0x688))) { orig(c); return; }
+	was = M32(ps + 0x400 + idx * 4);
+	orig(c);
+	side = bst_side(ch);
+	if (bst_log)
+		xrc_log("xrc: boost: param %u of %08x (side %d slot %d) = %d (was %d, HP %d)\n", idx, ch, side, bst_slot(ch),
+		        (s32)M32(ps + 0x400 + idx * 4), (s32)was, (s32)M32(ch + 0x290));
+	if (!bst_stats || (side != 0 && side != 3)) return;
+	maxv = idx == 1 ? 99999u : 999900u; /* (Strength and Magic are kept x 100: 9,999 as the game shows them) */
+	if (M32(ps + 0x400 + idx * 4) >= maxv) return;
+	M32(ps + 0x400 + idx * 4) = maxv;
+	if (idx == 1 && (s32)was > 0 && M32(ch + 0x290) == was) M32(ch + 0x290) = maxv;
+}
+#define BOOSTERS                                                                                                       \
+	{0x00e8b910u, bst_update, "update phases (Boosters: game speed, max gil)"},                                         \
+	{0x0046e6b0u, bst_add_hp, "battle HP change (Boosters: one-hit kills)"},                                          \
+	{0x004b8270u, bst_param, "battle parameter recompute (Boosters: max stats)"},
+
+#ifdef XRC_FRAME_LIMIT
 const XrcManual xrc_manual_game[] = {
+	BOOSTERS
 	{0x00e8d220u, m_pacer_tick, "frame pacer tick (XRC_FRAME_LIMIT)"},
 	{0x00e8d560u, m_frame_wait, "frame wait (XRC_FRAME_LIMIT: released at once if due)"},
 	{0x00e8d5a0u, xo_00e8d5a0, "frame due (fast: a minimum of idle work)"},
 };
-const unsigned xrc_manual_game_n = 3;
 #else
-const XrcManual xrc_manual_game[] = {{0x00e8d5a0u, xo_00e8d5a0, "frame due (fast: a minimum of idle work)"}};
-const unsigned xrc_manual_game_n = 1;
+const XrcManual xrc_manual_game[] = {BOOSTERS {0x00e8d5a0u, xo_00e8d5a0, "frame due (fast: a minimum of idle work)"}};
 #endif
+const unsigned xrc_manual_game_n = sizeof xrc_manual_game / sizeof xrc_manual_game[0];
