@@ -422,6 +422,7 @@ x87_flow :: proc(ins: []Rx_Ins, a, size: u32, entry: int, force: ^map[u32]int) -
 		} else if m == .CALL || (m == .JMP && (it.inst.ops[0].kind != .RELATIVE || !(rx_rel_target(it, 0) in idx))) {
 			e := X87_Eff{}
 			if it.inst.ops[0].kind == .RELATIVE {e = x87_effect(rx_rel_target(it, 0))}
+			analyzed := e.known && !e.flex // the callee's x87 effect is its own analysis's (not a guess at the call)
 			if e.known && e.flex && m == .CALL {
 				if e.kin < 0 {e.kin = d}
 				if force != nil {
@@ -451,7 +452,10 @@ x87_flow :: proc(ins: []Rx_Ins, a, size: u32, entry: int, force: ^map[u32]int) -
 			if e.transparent {
 				nd = d
 			} else {
-				deep := m == .CALL && it.inst.ops[0].kind == .RELATIVE && rx_rel_target(it, 0) in x87_deep && d > e.kin
+				// values below the arguments kept across the call: a CRT helper (x87_deep) leaves them alone, and so does any
+				// function whose effect is analysed (its x87 values are its own; MSVC's whole-program optimisation keeps st0 live
+				// across calls to SSE functions that return a float: FF13-2)
+				deep := m == .CALL && it.inst.ops[0].kind == .RELATIVE && (rx_rel_target(it, 0) in x87_deep || analyzed) && d > e.kin
 				if d != e.kin && !deep {return bad(&fl, d > e.kin ? "x87 live across call" : "x87 args", it.addr)}
 				if e.kin > 2 {return bad(&fl, "x87 args", it.addr)}
 				nd = d - e.kin + e.kout

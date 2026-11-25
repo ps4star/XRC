@@ -9,6 +9,8 @@ import x86 "core:rexcode/isa/x86"
 // such a function then leaves esp at its value before the call + N, which the call site writes as that (a constant
 // offset from the frame's value the C compiler already has) instead of reading it back from XCtx, and its stale
 // return-address slot unconditionally (x_call: the callee did not move the stack down).
+// A tail jump (jmp, jcc or the fall into the next function) to such a function likewise sets esp after it to the value
+// it had after the return address was taken off + N (x_post_tail). Indirect calls read esp back (their callee is not known).
 //
 // Per function, a forward data flow over its instructions of two offsets from the entry esp: esp's own, and ebp's
 // (a frame pointer set by mov ebp, esp; mov esp, ebp / leave / lea esp, [ebp - x] get esp back from it after an
@@ -312,9 +314,10 @@ x_stack_plan :: proc(addrs: []u32, funcs: map[u32]u32) {
 	fmt.printf("xrc: %d of %d functions return with the stack balanced (ret N; %d rounds): direct calls to them keep esp\n", n, len(addrs), rounds)
 }
 
-// after a direct call to target (x_s_: esp before it): esp and the stale return-address slot (see x_call)
+// after a call (x_s_: esp before it): esp and the stale return-address slot (see x_call). target: a direct call's
+// (0: an indirect call -- its callee's N not known, esp read back)
 x_post_call :: proc(xl: ^Xlat, target: u32, ra: u32) -> string {
-	if nn, ok := x_stk_n[target]; ok && x_stk_on && target in x_direct_ok {
+	if nn, ok := x_stk_n[target]; ok && x_stk_on && target != 0 && target in x_direct_ok {
 		chk := x_stk_verify ? fmt.tprintf(" if ((u32)c->esp != (u32)(x_s_ + 0x%xu)) xrc_stack_bad(c, 0x%xu, (u32)c->esp, (u32)(x_s_ + 0x%xu));", u32(nn), target, u32(nn)) : ""
 		return fmt.tprintf("   %s r_esp = x_s_ + 0x%xu; MX32(x_s_ - 4) = 0x%xu;", chk, u32(nn), ra)
 	}
@@ -423,3 +426,13 @@ stk_audit_all :: proc() {
 	for s in found {delete(s)}
 	delete(found)
 }
+
+// after a tail call's call (x_s_: esp after the return address was taken off): esp, when the target is balanced
+// (target: a direct jump's; nothing for a computed one)
+x_post_tail :: proc(xl: ^Xlat, target: u32) -> string {
+	nn, ok := x_stk_n[target]
+	if !ok || !x_stk_on || target == 0 || !(target in x_direct_ok) {return ""}
+	chk := x_stk_verify ? fmt.tprintf(" if ((u32)c->esp != (u32)(x_s_ + 0x%xu)) xrc_stack_bad(c, 0x%xu, (u32)c->esp, (u32)(x_s_ + 0x%xu));", u32(nn), target, u32(nn)) : ""
+	return fmt.tprintf("   %s r_esp = x_s_ + 0x%xu;", chk, u32(nn))
+}
+

@@ -39,7 +39,7 @@ usage :: proc() {
   --llvm            also write page_XXXX.ll: the functions the LLVM IR backend can do, in IR (experimental)
   -h, --help        this
 
-Environment variables (XRC_NO_SLOTS, XRC_INLINE, XRC_DEVIRT, XRC_TIME, ...): see README.md.`)
+Environment variables (XRC_INLINE, XRC_DEVIRT, XRC_TIME, ...): see README.md.`)
 }
 
 // the folder xrc's executable is in (not os.args[0]: started from WSL that is a Linux path)

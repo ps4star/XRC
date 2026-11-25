@@ -543,6 +543,7 @@ rx_jump_table :: proc(ins: []Rx_Ins, k: int, a, size: u32) -> (out: [dynamic]u32
 	bound := -1
 	btbl: u32 = 0
 	bload: u32 = 0
+	bbase: x86.Register // (the byte table load's base register)
 	pc := j.addr
 	for q := k - 1; q >= 0 && q >= k - 8; q -= 1 {
 		p := &ins[q]
@@ -551,12 +552,22 @@ rx_jump_table :: proc(ins: []Rx_Ins, k: int, a, size: u32) -> (out: [dynamic]u32
 		pm := p.inst.mnemonic
 		if pm == .MOVZX && p.inst.ops[1].kind == .MEMORY && p.inst.ops[1].size == 1 {
 			bm := p.inst.ops[1].mem
-			if x86.mem_has_base(bm) && !x86.mem_has_index(bm) {btbl = u32(bm.disp); bload = p.addr}
+			if x86.mem_has_base(bm) && !x86.mem_has_index(bm) {btbl = u32(bm.disp); bload = p.addr; bbase = x86.mem_base(bm)}
 		}
 		if (pm == .JA || pm == .JNBE) && q > 0 {
 			c := &ins[q - 1]
 			if c.addr + c.len == p.addr && c.inst.mnemonic == .CMP && c.inst.operand_count == 2 && c.inst.ops[1].kind == .IMMEDIATE {
 				bound = int(c.inst.ops[1].immediate) + 1
+				// the bound checked on `lea r, [base + d]` with the byte table read at [base + t] (FF13-2 0096e7c0: lea eax,
+				// [edi - 0xa]; cmp eax, 0x32; ja; movzx ecx, byte [edi + t]): the bytes the switch reads start at t - d
+				if btbl != 0 && q > 1 && c.inst.ops[0].kind == .REGISTER {
+					l := &ins[q - 2]
+					if l.addr + l.len == c.addr && l.inst.mnemonic == .LEA && l.inst.ops[0].kind == .REGISTER && l.inst.ops[0].reg == c.inst.ops[0].reg &&
+					   l.inst.ops[0].reg != bbase {
+						lm := l.inst.ops[1].mem
+						if x86.mem_has_base(lm) && !x86.mem_has_index(lm) && x86.mem_base(lm) == bbase {btbl = u32(i64(btbl) - i64(lm.disp))}
+					}
+				}
 			}
 			break
 		}
@@ -586,7 +597,7 @@ rx_jump_table :: proc(ins: []Rx_Ins, k: int, a, size: u32) -> (out: [dynamic]u32
 		for e in 0 ..< n {
 			if tbl + u32(4 * e) + 4 > exe.hi {break}
 			t := entry(tbl + u32(4 * e))
-			if t < a || t >= a + size {return out, false} // a bounded table must be all in range
+			if (t < a || t >= a + size) && !rx_in_chunk(j.addr, t, j.addr < a || j.addr >= a + size) {return out, false} // a bounded table must be all in range
 			append(&out, t)
 		}
 		return out, len(out) > 0
@@ -615,4 +626,21 @@ rx_jump_table :: proc(ins: []Rx_Ins, k: int, a, size: u32) -> (out: [dynamic]u32
 		append(&out, t)
 	}
 	return out, len(out) > 0
+}
+
+// whether t is in the same map function as the jmp at j (a switch in a jump chunk: code of another function, followed
+// as the jumper's own -- x_jump_chunk -- whose cases lie in that function, not in the jumper's range)
+rx_in_chunk :: proc(j, t: u32, outside := false) -> bool {
+	if len(fstarts) == 0 {return false}
+	k, found := slice.binary_search(fstarts, j)
+	if !found {
+		if k == 0 {return false}
+		k -= 1
+	}
+	s := fstarts[k]
+	if s == j && !found {return false}
+	// (outside: the jmp is in code this function reached beyond its own range -- another function's body it jumps into
+	// (XIII-2 00d33ea0 -> 00d33c70): the table's targets are that function's)
+	if !outside && !(s in x_jump_chunk) {return false}
+	return t >= s && t < s + funcs[s]
 }

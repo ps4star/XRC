@@ -9,7 +9,7 @@ package xrc
 // guest memory, and a call goes to another translation directly (XCALLD*) or through the dispatcher (XCALL) --
 // include/xrc.h has those macros. x87 and SSE: xrc_fp.odin. A function that uses something not handled is reported
 // as needing a hand-written override (--report) and gets no translation. Also here: the callee-saved register plan
-// (x_abi_*), inlining (x_inline_*), devirtualization (x_devirt_*), stack slot promotion, the dispatch table and the
+// (x_abi_*), inlining (x_inline_*), devirtualization (x_devirt_*), the dispatch table and the
 // page files (x_flush_page: only changed pages are rewritten).
 
 import "base:intrinsics"
@@ -60,12 +60,6 @@ Xlat :: struct {
 	cur:     int, // the index of the instruction being emitted
 	cur_addr: u32,
 	direct:  [dynamic]u32, // the translations this one calls directly (XCALLD: declared before it)
-	// stack slots kept in C locals (x_slot_plan): frame offset (negative, from ebp) -> promoted; the instruction after
-	// which they are loaded; the ones an instruction used otherwise than as M32 (dropped, retranslated without)
-	slots:     map[i32]bool,
-	slot_init: u32,
-	slot_cur:  i32, // the slot the instruction being emitted accesses (0: none)
-	slot_bad:  map[i32]bool,
 	spin_back: map[u32]bool, // backward jumps of call-free loops with an atomic (spin locks): XRC_SPIN_YIELD
 	inl_back:  map[u32]bool, // backward jumps of loops whose every call is inlined: XRC_INL_PREEMPT (each call was a
 	                         // point where a waiting thread got the GIL -- a loop polling through a getter needs one)
@@ -83,7 +77,6 @@ Xlat :: struct {
 // search by address (xrc_dispatch). x_direct_ok: the function starts that may be called so (not hand-written or
 // unreachable: those stay with the dispatcher, where a hand-written version wins); x_direct_used: the ones called.
 // A target whose translation fails anyway gets a forwarding stub in the dispatch table (xf_X -> xrc_dispatch).
-x_no_slots := false // XRC_NO_SLOTS=1: no stack slot promotion (to compare)
 x_direct_ok: map[u32]bool
 // "fast" overrides (overrides.tsv): a hand-written xo_<addr> in the runtime replaces the function; translated as
 // usual (the reference it is checked against), but direct calls go to xo_<addr>
@@ -641,10 +634,7 @@ x_emit :: proc(xl: ^Xlat, ins: ^Rx_Ins) {
 		ea = "_ea"
 		have_ea = true
 		mm := ops[mem_i].mem
-		if len(xl.slots) > 0 && mm.segment == 0 && x86.mem_has_base(mm) && x86.mem_base(mm) == x86.EBP && !x86.mem_has_index(mm) && mm.disp in xl.slots {
-			xl.slot_cur = mm.disp // (a promoted slot: x_translate puts its local in place of M32(_ea))
-			pf(xl, "    {")
-		} else if r, d, flat := x_flat_addr(mm); flat {
+		if r, d, flat := x_flat_addr(mm); flat {
 			flat_start = len(xl.b.buf)
 			pf(xl, d < 0 ? "    { XEA_T _ea = (XEA_T)(%s) - 0x%xu;" : "    { XEA_T _ea = (XEA_T)(%s) + 0x%xu;", r, d < 0 ? u32(-d) : u32(d))
 		} else {
@@ -1397,7 +1387,7 @@ x_inline_one :: proc(idx: int) {
 			if pbad == 0 && np > limit {return}
 		}
 		xl := x_translate(a, funcs[a])
-		ok := xl.ok && (xl.nins <= maxn || (a in hotl && xl.nins <= hotmax)) && !xl.uses_fp && !xl.uses_mm && len(xl.slots) == 0 && !xl.fret
+		ok := xl.ok && (xl.nins <= maxn || (a in hotl && xl.nins <= hotmax)) && !xl.uses_fp && !xl.uses_mm && !xl.fret
 		body := strings.to_string(xl.b)
 		if ok {for w in BAD {if strings.contains(body, w) {ok = false; break}}}
 		calls := strings.contains(body, "XCALL")
@@ -1405,7 +1395,7 @@ x_inline_one :: proc(idx: int) {
 		if a == why {
 			bw := ""
 			for w in BAD {if strings.contains(body, w) {bw = w}}
-			fmt.printf("xrc: inline %08x: ok %v nins %d fp %v mm %v slots %d fret %v x %v calls %v bad %q -> %v\n", a, xl.ok, xl.nins, xl.uses_fp, xl.uses_mm, len(xl.slots), xl.fret, xl.uses_x, calls, bw, ok)
+			fmt.printf("xrc: inline %08x: ok %v nins %d fp %v mm %v fret %v x %v calls %v bad %q -> %v\n", a, xl.ok, xl.nins, xl.uses_fp, xl.uses_mm, xl.fret, xl.uses_x, calls, bw, ok)
 		}
 		if ok {
 			il := X_Inline{nins = xl.nins, uses_x = xl.uses_x, uses_f = xl.uses_f, uses_ffl = xl.uses_ffl}
@@ -1584,7 +1574,7 @@ x_call :: proc(xl: ^Xlat, ins: ^Rx_Ins, ops: []x86.Operand, ea: string, have_ea:
 			}
 			pf(xl, "    }} else {{ XEA_T x_s_ = r_esp;")
 			x_call_fp(xl, ins, "x_dv_", 0, 0)
-			pf(xl, "    if (r_esp >= x_s_) MX32(x_s_ - 4) = 0x%xu; }} }}", ra)
+			pf(xl, "%s }} }}", x_post_call(xl, 0, ra))
 			xl.n_devirt += 1
 			return
 		}
@@ -1594,7 +1584,7 @@ x_call :: proc(xl: ^Xlat, ins: ^Rx_Ins, ops: []x86.Operand, ea: string, have_ea:
 	// callee moved the stack down (__SEH_prolog4, __chkstk): the slot is then inside the new frame, and live
 	pf(xl, "    { XEA_T x_s_ = r_esp;")
 	x_call_fp(xl, ins, t, 0, direct)
-	pf(xl, "%s }", direct != 0 ? x_post_call(xl, direct, ins.addr + ins.len) : fmt.tprintf("    if (r_esp >= x_s_) MX32(x_s_ - 4) = 0x%xu;", ins.addr + ins.len))
+	pf(xl, "%s }", x_post_call(xl, direct, ins.addr + ins.len)) // (direct 0: an indirect call, esp read back)
 }
 
 // XCALL / XCALLX with the x87 arguments and result of the call site (from the x87 flow pass). ra: the return
@@ -1685,10 +1675,13 @@ x_jmp :: proc(xl: ^Xlat, ins: ^Rx_Ins, ops: []x86.Operand, ea: string, have_ea: 
 
 // a tail call: the return address on top of the stack is ours, so pop it, run the target (which pushes its own and
 // pops its arguments), put it back and return through it
-x_tail :: proc(xl: ^Xlat, ins: ^Rx_Ins, t: string, key: u32 = 0, direct: u32 = 0) {
+x_tail :: proc(xl: ^Xlat, ins: ^Rx_Ins, t: string, key: u32 = 0, direct: u32 = 0, stk: u32 = 0) {
 	k := key != 0 ? key : ins.addr
-	pf(xl, "    { u32 x_ip_ = MX32(r_esp); r_esp += 4;")
+	// (stk: the target, for its stack balance, when it is not given as direct: esp after it known -- x_post_tail)
+	post := x_post_tail(xl, stk != 0 ? stk : direct)
+	pf(xl, post != "" ? "    { u32 x_ip_ = MX32(r_esp); r_esp += 4; XEA_T x_s_ = r_esp;" : "    { u32 x_ip_ = MX32(r_esp); r_esp += 4;")
 	x_call_fp(xl, ins, t, k, direct, "x_ip_")
+	if post != "" {pf(xl, "%s", post)}
 	pf(xl, "    r_esp -= 4; MX32(r_esp) = x_ip_; }")
 	if xl.fret {
 		e := xl.callfp[k]
@@ -1706,7 +1699,7 @@ x_jcc :: proc(xl: ^Xlat, ins: ^Rx_Ins, ops: []x86.Operand) {
 		cc := x_cc(m)
 		if cc < 0 {fail(xl, "jcc->outside"); return}
 		pf(xl, "    if (%s) {", x_cond_expr(xl, cc))
-		x_tail(xl, ins, x_hexu(u32(t)))
+		x_tail(xl, ins, x_hexu(u32(t)), stk = t)
 		pf(xl, "    }")
 		return
 	}
@@ -1790,8 +1783,6 @@ x_spin_plan :: proc(xl: ^Xlat, ins: []Rx_Ins) {
 
 x_translate :: proc(a: u32, size: u32, exclude: map[i32]bool = nil, nofl := false) -> Xlat {
 	xl := Xlat{addr = a, size = size, ok = true, labels = make(map[u32]bool)}
-	xl.slots = make(map[i32]bool, context.temp_allocator)
-	xl.slot_bad = make(map[i32]bool, context.temp_allocator)
 	xl.tables = make(map[u32][dynamic]u32, context.temp_allocator)
 	xl.btables = make(map[u32]bool, context.temp_allocator)
 	strings.builder_init(&xl.b)
@@ -1843,7 +1834,6 @@ x_translate :: proc(a: u32, size: u32, exclude: map[i32]bool = nil, nofl := fals
 	xl.fmax = fl.fmax
 	if xl.fret || fl.fmax > 0 {xl.uses_fp = true}
 	decoded := body // (the same set: every decoded address)
-	if !x_no_slots {x_slot_plan(&xl, ins[:], exclude)}
 	if !nofl && !x_fl_disabled() {x_fl_plan(&xl, ins[:], a)}
 	prev_end: u32 = 0
 	// the instructions are in address order: a chunk below the entry (a shared tail the function jumps back to, as
@@ -1863,12 +1853,7 @@ x_translate :: proc(a: u32, size: u32, exclude: map[i32]bool = nil, nofl := fals
 		if prev_end == i.addr && !(i.addr in xl.labels) {xl.fuse, xl.fuse_sz = xl.fl_kind, xl.fl_sz}
 		xl.fl_kind = 0
 		x_bad_reg = false
-		// the frame ends: the promoted slots back to the stack
-		if len(xl.slots) > 0 && ((i.inst.mnemonic == .POP && i.inst.operand_count == 1 && i.inst.ops[0].kind == .REGISTER && i.inst.ops[0].reg == x86.EBP) || i.inst.mnemonic == .LEAVE) {
-			for d in xl.slots {pf(&xl, "    M32(r_ebp - 0x%xu) = s_%x;", u32(-d), u32(-d))}
-		}
 		start := len(xl.b.buf)
-		xl.slot_cur = 0
 		xl.inl_site = false
 		x_emit(&xl, &i)
 		if x_bad_reg && xl.ok {fail(&xl, "register")}
@@ -1879,41 +1864,15 @@ x_translate :: proc(a: u32, size: u32, exclude: map[i32]bool = nil, nofl := fals
 			xl.fl_bad = true
 			if x_fl_debug() {fmt.eprintf("xrc flags %08x: %08x %s touches the flags: again without the plan\n", a, i.addr, rx_mn(&i))}
 		}
-		if xl.slot_cur != 0 {
-			seg := strings.clone(string(xl.b.buf[start:]), context.temp_allocator)
-			name := fmt.tprintf("s_%x", u32(-xl.slot_cur))
-			seg, _ = strings.replace_all(seg, "M32(_ea)", name, context.temp_allocator)
-			if x_mentions_ea(seg) {
-				if os.get_env("XRC_SLOT_DEBUG", context.temp_allocator) != "" {fmt.eprintf("slot %x at %08x: %s\n", -xl.slot_cur, i.addr, seg)}
-				xl.slot_bad[xl.slot_cur] = true
-			} else {
-				resize(&xl.b.buf, start)
-				strings.write_string(&xl.b, seg)
-			}
-		}
-		// the frame exists: the promoted slots from the stack
-		if len(xl.slots) > 0 && i.addr == xl.slot_init {
-			for d in xl.slots {pf(&xl, "    s_%x = M32(r_ebp - 0x%xu);", u32(-d), u32(-d))}
-		}
 		prev_end = i.addr + i.len
 		if !xl.ok {break}
 		// execution continues past the function's end (it falls into the next function): a tail call there
 		nx := i.addr + i.len
 		if !rx_is_branch_end(i.inst.mnemonic) && !(nx in decoded) {
 			pf(&xl, "    /* falls through to %08x */", nx)
-			x_tail(&xl, &i, x_hexu(u32(nx)), nx | 0x80000000)
+			x_tail(&xl, &i, x_hexu(u32(nx)), nx | 0x80000000, stk = nx)
 		}
 		append(&spans, [2]int{span0, len(xl.b.buf)})
-	}
-	// a promoted slot an instruction used some other way: again without it (and the ones found before)
-	if xl.ok && len(xl.slot_bad) > 0 && len(exclude) < 64 {
-		ex := make(map[i32]bool, context.temp_allocator)
-		for d in exclude {ex[d] = true}
-		for d in xl.slot_bad {ex[d] = true}
-		strings.builder_destroy(&xl.b)
-		delete(xl.labels)
-		delete(xl.direct)
-		return x_translate(a, size, ex, nofl || xl.fl_bad)
 	}
 	if xl.ok && xl.fl_bad {
 		strings.builder_destroy(&xl.b)
@@ -1922,95 +1881,8 @@ x_translate :: proc(a: u32, size: u32, exclude: map[i32]bool = nil, nofl := fals
 		return x_translate(a, size, exclude, true)
 	}
 	// (not in an inlining candidate: its body runs on its callers' locals, whose syncs are theirs)
-	if xl.ok && !x_inline_off && len(xl.slots) == 0 && len(spans) == len(ins) {x_sync_plan(&xl, ins[:], spans[:], a)}
+	if xl.ok && !x_inline_off && len(spans) == len(ins) {x_sync_plan(&xl, ins[:], spans[:], a)}
 	return xl
-}
-
-// Stack slot promotion: in a function with the frame `push ebp; mov ebp, esp; sub esp, N`, the dword locals
-// [ebp-k] become C locals (s_<k>), which the compiler keeps in registers -- guest memory accesses that any store
-// would otherwise order (MSVC /Od code keeps every variable in its slot). Only when nothing can reach the frame but
-// these accesses: ebp is used only as their base (and by the epilogue, the /GS cookie's xor), never taken as an
-// address (lea, mov from ebp, an indexed [ebp + reg]), and no instruction names [esp + N]; a slot is promoted only
-// if every access to its bytes is that same dword, by an integer instruction. Exactness: the slots are loaded from
-// memory once the frame exists, and written back before the frame ends (pop ebp / leave), so the stack holds what
-// the original left there (stale slots the game reads as uninitialized locals stay the same).
-// the address temp _ea as a whole word (not the _ea of r_eax)
-x_mentions_ea :: proc(t: string) -> bool {
-	for k := 0; k + 3 <= len(t); k += 1 {
-		if t[k:k + 3] != "_ea" {continue}
-		if k > 0 {
-			p := t[k - 1]
-			if (p >= 'a' && p <= 'z') || (p >= 'A' && p <= 'Z') || (p >= '0' && p <= '9') || p == '_' {continue}
-		}
-		if k + 3 < len(t) {
-			n := t[k + 3]
-			if (n >= 'a' && n <= 'z') || (n >= 'A' && n <= 'Z') || (n >= '0' && n <= '9') || n == '_' {continue}
-		}
-		return true
-	}
-	return false
-}
-
-x_slot_plan :: proc(xl: ^Xlat, ins: []Rx_Ins, exclude: map[i32]bool) {
-	if len(ins) < 4 || ins[0].addr != xl.addr {return}
-	is_reg :: proc(o: x86.Operand, r: x86.Register) -> bool {return o.kind == .REGISTER && o.reg == r}
-	i0, i1, i2 := &ins[0], &ins[1], &ins[2]
-	if i0.inst.mnemonic != .PUSH || i0.inst.operand_count != 1 || !is_reg(i0.inst.ops[0], x86.EBP) {return}
-	if i1.inst.mnemonic != .MOV || i1.inst.operand_count != 2 || !is_reg(i1.inst.ops[0], x86.EBP) || !is_reg(i1.inst.ops[1], x86.ESP) {return}
-	if i2.inst.mnemonic != .SUB || i2.inst.operand_count != 2 || !is_reg(i2.inst.ops[0], x86.ESP) || i2.inst.ops[1].kind != .IMMEDIATE {return}
-	frame := i32(i2.inst.ops[1].immediate)
-	if frame <= 0 || frame > 0x10000 {return}
-	Acc :: struct {d: i32, sz: i32, good: bool}
-	accs := make([dynamic]Acc, context.temp_allocator)
-	for &i, k in ins {
-		if k < 3 {continue}
-		m := i.inst.mnemonic
-		n := int(i.inst.operand_count)
-		if i.xop != .None {
-			// (its memory operand, if any, is ops[0]: checked below as a non-integer access)
-		}
-		mn := rx_mn(&i)
-		intop := i.xop == .None && !(len(mn) > 0 && (mn[0] == 'f' || mn[0] == 'F'))
-		for q in 0 ..< n {
-			o := i.inst.ops[q]
-			if o.kind == .REGISTER {
-				cl := x86.reg_class(o.reg)
-				if cl != x86.REG_GPR32 && cl != x86.REG_GPR16 && cl != x86.REG_GPR8 && cl != x86.REG_GPR8H {intop = false}
-			}
-		}
-		for q in 0 ..< n {
-			o := i.inst.ops[q]
-			if o.kind == .REGISTER && (o.reg == x86.EBP || o.reg == x86.BP) {
-				switch {
-				case m == .POP && q == 0:                                       // the epilogue
-				case m == .MOV && q == 1 && n == 2 && is_reg(i.inst.ops[0], x86.ESP): // mov esp, ebp
-				case m == .XOR && q == 1 && !is_reg(i.inst.ops[0], x86.EBP):     // the /GS cookie
-				case: return
-				}
-			}
-			if o.kind != .MEMORY {continue}
-			mm := o.mem
-			if mm.segment != 0 {continue}
-			if x86.mem_has_base(mm) && x86.mem_base(mm) == x86.ESP {return}
-			if x86.mem_has_index(mm) && (x86.mem_index(mm) == x86.EBP || x86.mem_index(mm) == x86.ESP) {return}
-			if !x86.mem_has_base(mm) || x86.mem_base(mm) != x86.EBP {continue}
-			if x86.mem_has_index(mm) || m == .LEA {return}
-			if mm.disp >= 0 {continue} // the arguments: not promoted
-			sz := i32(o.size)
-			if sz <= 0 || i.xop != .None {sz = 16} // (an SSE / MMX operand: up to 16 bytes)
-			append(&accs, Acc{mm.disp, sz, intop && sz == 4})
-		}
-		if m == .ENTER {return}
-	}
-	for a in accs {
-		if !a.good || a.d < -frame || a.d % 4 != 0 || a.d in exclude {continue}
-		clean := true
-		for b in accs {
-			if b.d < a.d + 4 && a.d < b.d + b.sz && (b.d != a.d || !b.good) {clean = false; break}
-		}
-		if clean {xl.slots[a.d] = true}
-	}
-	if len(xl.slots) > 0 {xl.slot_init = i2.addr}
 }
 
 // op_str via rexcode printer, best-effort for the comment
@@ -2095,7 +1967,6 @@ cmd_xrc :: proc(args: []string) -> int {
 		}
 	}
 	n_manual, n_unreach := 0, 0
-	x_no_slots = os.get_env("XRC_NO_SLOTS", context.temp_allocator) != ""
 	x_direct_ok = make(map[u32]bool)
 	x_direct_used = make(map[u32]bool)
 	if all {for a in addrs {if !(a in covered) && !(a in wrapped) {x_direct_ok[a] = true}}}
@@ -2311,8 +2182,11 @@ x_disc_one :: proc(n: int) {
 	rx_table_slots, rx_byte_tables = nil, nil
 	ins, _ := rx_function(a, funcs[a], context.temp_allocator)
 	r.covered = make([dynamic]u32, 0, len(ins))
+	sz := funcs[a]
 	for &i in ins {
-		append(&r.covered, i.addr)
+		// (only its own body: code it reached as a chunk beyond it can be another function's, referenced on its own --
+		// XIII-2 00a67fa0 `jmp 00a692c0`, a vtable holding 00a692c0)
+		if i.addr >= a && i.addr < a + sz {append(&r.covered, i.addr)}
 		if rx_is_branch_end(i.inst.mnemonic) {append(&r.ends, i.addr + i.len)}
 		// (not `call $+5`: PIC code's way of reading its own address, a push and no function)
 		if i.inst.mnemonic == .CALL && i.inst.operand_count > 0 && i.inst.ops[0].kind == .RELATIVE && rx_rel_target(&i, 0) != i.addr + i.len {
@@ -2370,7 +2244,9 @@ x_discover_entries :: proc() -> [dynamic]u32 {
 		for _, slots in rx_table_slots {
 			for st in slots {
 				nb := exe_read(st[0] + 4, 4)
-				if len(nb) == 4 && u32le(nb, 0) >= exe.text_lo && u32le(nb, 0) < exe.text_hi {continue}
+				// (near the table's own targets: the next function's first bytes can also read as a code address -- XIII-2
+				// 00926eb0's `81 ec 9c 00` = 009cec81)
+				if len(nb) == 4 && u32le(nb, 0) >= exe.text_lo && u32le(nb, 0) < exe.text_hi && abs(i64(u32le(nb, 0)) - i64(st[1])) < 0x10000 {continue}
 				ends[st[0] + 4] = true
 			}
 		}
@@ -2454,12 +2330,6 @@ x_append_function :: proc(sb: ^strings.Builder, xl: ^Xlat) {
 		fmt.sbprintf(sb, "    double f0 = 0")
 		for k in 1 ..< max(xl.fmax, 1) {fmt.sbprintf(sb, ", f%d = 0", k)}
 		fmt.sbprintf(sb, ";\n    u32 x_fsw = 0, x_fcw = 0x27f;\n")
-	}
-	if len(xl.slots) > 0 {
-		fmt.sbprintf(sb, "    u32")
-		k := 0
-		for d in xl.slots {fmt.sbprintf(sb, "%s s_%x = 0", k > 0 ? "," : "", u32(-d)); k += 1}
-		fmt.sbprintf(sb, ";\n")
 	}
 	fmt.sbprintf(sb, "    XRC_LOCALS\n")
 	if xl.uses_fp {fmt.sbprintf(sb, "    XRC_FCW_INIT\n")}

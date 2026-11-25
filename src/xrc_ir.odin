@@ -2247,7 +2247,6 @@ is_setcc :: proc(ins: ^Rx_Ins) -> bool {return strings.has_prefix(rx_mn(ins), "s
 // whether the C translation shows something this backend leaves to C
 ir_eligible :: proc(xl: ^Xlat) -> (bool, string) {
 	if !xl.ok {return false, "not translated"}
-	if len(xl.slots) > 0 {return false, "slots"}
 	return true, ""
 }
 

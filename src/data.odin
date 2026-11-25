@@ -130,9 +130,12 @@ load_pe :: proc(d: []u8) -> bool {
 		s.raw = u32le(d, o + 20)
 		s.chars = u32le(d, o + 36)
 		s.base = base + va
+		// the code: every executable section (FF13-2 has two, .text and MSSMIXER: the last one alone left discovery
+		// out of .text)
 		if s.chars & Sec_Exec != 0 {
-			exe.text_lo = exe.lo + va
-			exe.text_hi = exe.lo + va + s.vsize
+			if exe.text_hi == 0 {exe.text_lo = exe.lo + va}
+			exe.text_lo = min(exe.text_lo, exe.lo + va)
+			exe.text_hi = max(exe.text_hi, exe.lo + va + s.vsize)
 		}
 		if s.chars & Sec_Write != 0 {
 			append(&exe.writable, [2]u32{(exe.lo + va) & ~u32(PAGE - 1), (exe.lo + va + s.vsize + PAGE - 1) & ~u32(PAGE - 1)})

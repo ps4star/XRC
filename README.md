@@ -261,14 +261,12 @@ Notes on each format:
 
 ## Environment variables
 
-Every variable is optional. The defaults are the settings the FINAL FANTASY XIII port ships with, except
-`XRC_NO_SLOTS`: that port's build always sets it to 1.
+Every variable is optional. The defaults are the settings the FINAL FANTASY XIII port ships with.
 
 ### Optimizations
 
 | Variable | Default | Effect |
 |---|---|---|
-| `XRC_NO_SLOTS=1` | off | Turns [stack slot promotion](#optimizations) off. Measured no faster on FINAL FANTASY XIII and riskier, so its build always sets this. |
 | `XRC_FLAGS_OLD=1` | off | Turns flag liveness and compare-branch fusion off: every flag is computed lazily, as in xrc's first output. For comparison. |
 | `XRC_SYNC_TRIM=0` | on | Turns register-sync trimming off, so every call and return saves and reloads every register. |
 | `XRC_FLAT_EA=0` | on | Turns flat addressing off. When on, `[reg + small displacement]` addresses are 64-bit sums (`MX*` accesses) and `esp`/`ebp` live in 64-bit C variables, so the host compiler folds each displacement into one instruction instead of a separate 32-bit add (FF13: code 5% smaller, main thread 3-4% faster). Only addresses that would wrap past 0 or 4 GB differ, and none of those is valid. |
@@ -745,13 +743,6 @@ All of these are on by default unless noted, and each has a switch to turn it of
   profile saw at least 90% of its calls go to one function, or 95% to two. `if (target == F)` runs F's inlined body
   or a direct call, and anything else takes the normal dispatch. The guard compares the real target, so a wrong
   profile only costs speed.
-- **Stack slot promotion** (on unless `XRC_NO_SLOTS=1`; the FINAL FANTASY XIII build turns it off).
-  - In a function with a standard `ebp` frame, dword locals (`[ebp-k]`) become C locals, which the C compiler keeps
-    in registers.
-  - This is done only when nothing else can reach the frame: `ebp` is never taken as an address, and no `[esp+N]`
-    access aliases a slot.
-  - The slots are loaded from memory when the frame is set up and written back before it ends, so the stack holds
-    what the original left there.
 
 Measured on FINAL FANTASY XIII (headless, main-thread CPU per frame, Clang without PGO), inlining and
 devirtualization together took the field from 7.40 to 6.88 ms and battle from 7.10 to about 6.55 ms. The binary grew
