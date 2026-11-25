@@ -35,6 +35,11 @@
 00e8b910	wrapped	the update phases with the step (ovr_game.c Boosters: game speed, max gil)
 0046e6b0	wrapped	a battle character's HP change (ovr_game.c Boosters: one-hit kills)
 004b8270	wrapped	a battle character's parameter recompute (ovr_game.c Boosters: max stats)
+00b6c620	wrapped	gil + delta (ovr_game.c Boosters: max gil keeps the real gil)
+00b6c5c0	wrapped	gil = value (ovr_game.c Boosters: max gil keeps the real gil)
+00b6ffd0	wrapped	a character's CP + delta (ovr_game.c Boosters: max CP keeps the real CP)
+00b694e0	wrapped	CP spent in the Crystarium (ovr_game.c Boosters: free with max CP)
+00b6e600	wrapped	party data from a save (ovr_game.c Boosters: the real gil and CP)
 0100f808	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
 0100f938	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
 010108bd	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_crt_math.c
