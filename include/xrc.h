@@ -666,7 +666,7 @@ void xrc_stack_bad(XCtx *c, u32 target, u32 esp, u32 expected);
 	{                                                                                                               \
 		u32 _ip_ = MX32(r_esp);                                                                                      \
 		r_esp += 4u + (u32)(nbytes);                                                                                \
-		if (_ip_ != (ra_)) {                                                                                        \
+		if ((ra_) != 0 && XRC_UNL(_ip_ != (ra_))) {                                                                                      \
 			c->eax = r_eax; c->ecx = r_ecx; c->edx = r_edx; c->ebx = r_ebx;                                         \
 			c->ebp = r_ebp; c->esi = r_esi; c->edi = r_edi; c->esp = r_esp; c->eip = _ip_;                           \
 			xrc_bad_return(c, (tgt_));                                                                              \
@@ -851,6 +851,8 @@ static __declspec(naked) void xrc_enterf(void) { XRC_ENTER_BODY(__asm { fld qwor
 #define XRC_INL_PREEMPT()
 #define XCALLXD(tgt, kin_, kout_, fn) XCALLX(tgt, kin_, kout_)
 #define XCALLXMD(tgt, kin_, kout_, fn) XCALLXM(tgt, kin_, kout_)
+/* (m_ & 0x100: no return-address check -- a stack-balanced callee, xrc_translator x_ret_nocheck; 0x200: no
+ * preemption check -- x_call_nopre: the loops around it have them) */
 #define XCALLDK(tgt, fn, m_) XCALLD(tgt, fn)
 #define XCALLMDK(tgt, fn, m_) XCALLMD(tgt, fn)
 #define XCALLXDK(tgt, kin_, kout_, fn, m_) XCALLXD(tgt, kin_, kout_, fn)
@@ -894,8 +896,21 @@ void xrc_preempt(void);
 void xrc_preempt_n(XCtx *c);
 /* a call is a point where a thread waiting for the GIL may get it: counted in the guest thread's XCtx (a register
  * away), xrc_preempt (thread-local counter, the clock) only every XRC_PREEMPT_N calls */
+/* the rare paths of a call site (a wrong return, a preemption) marked unlikely, their functions cold -- the compiler
+ * moves them out of line, so call sites are shorter in the hot code (2026-11-23: battle -2.2%; -DXRC_NO_COLD: off) */
+#if !defined(XRC_NO_COLD) && (defined(__GNUC__) || defined(__clang__))
+#define XRC_UNL(x) __builtin_expect(!!(x), 0)
+#define XRC_COLDFN __attribute__((cold))
+#else
+#define XRC_UNL(x) (x)
+#define XRC_COLDFN
+#endif
+XRC_COLDFN void xrc_preempt_n(XCtx *c);
+XRC_COLDFN void xrc_bad_return(XCtx *c, u32 target);
+/* an import call the stack balance took to pop N (xrc_translator x_imp_n) left esp elsewhere: fatal */
+XRC_COLDFN void xrc_imp_bad(XCtx *c, u32 slot, u32 site);
 #define XRC_PREEMPT_N 64u
-#define XRC_PREEMPT() { if (xrc_gil_waiters && ++c->pre_n >= XRC_PREEMPT_N) xrc_preempt_n(c); }
+#define XRC_PREEMPT() { if (XRC_UNL(xrc_gil_waiters && ++c->pre_n >= XRC_PREEMPT_N)) xrc_preempt_n(c); }
 #ifdef XRC_NO_IC
 #define XCALL(tgt) { u32 t_ = (tgt); r_esp -= 4; MX32(r_esp) = x_ra_; XRC_SPILL xrc_dispatch(c, t_); XRC_FILL }
 #else
@@ -913,7 +928,7 @@ void xrc_preempt(void);
 void xrc_bad_return(XCtx *c, u32 target);
 #define XCALL(tgt) { static XIc ic_ = {0xffffffffu, 0, 0}; u32 t_ = (tgt); r_esp -= 4; MX32(r_esp) = x_ra_; XRC_SPILL \
 	if (t_ == ic_.addr) { XRC_PREEMPT() if (ic_.imp) xrc_imp_enter(ic_.imp - 1u); XRC_DS_PUSH(t_) ic_.fn(c); XRC_DS_POP() \
-		if (c->eip != x_ra_) xrc_bad_return(c, t_); } \
+		if (XRC_UNL(c->eip != x_ra_)) xrc_bad_return(c, t_); } \
 	else xrc_dispatch_ic(c, t_, &ic_); XRC_FILL }
 #endif
 #define XCALLX(tgt, kin_, kout_) { if ((kin_) >= 1) c->fa[0] = x_fa[0]; if ((kin_) >= 2) c->fa[1] = x_fa[1]; XCALL(tgt) if ((kout_) >= 1) x_fret = c->st0; }
@@ -956,7 +971,7 @@ void xrc_abi_violation(u32 target, u32 ra, unsigned mask);
 #define XRC_ABI_NOTE(tgt)
 #endif
 #define XCALLD(tgt, fn) { r_esp -= 4; MX32(r_esp) = x_ra_; XRC_SPILL XRC_PREEMPT() XRC_DS_PUSH(tgt) fn(c); XRC_DS_POP() \
-	if (c->eip != x_ra_) xrc_bad_return(c, (tgt)); XRC_ABI_NOTE(tgt) XRC_FILL }
+	if (XRC_UNL(c->eip != x_ra_)) xrc_bad_return(c, (tgt)); XRC_ABI_NOTE(tgt) XRC_FILL }
 /* the backward jump of a call-free loop with an atomic in it (xchg / lock / pause: a spin lock): the GIL to a waiting
  * thread, which may be the one holding the lock (without this the spinner keeps the GIL forever: a deadlock) */
 void xrc_spin_yield(void);
@@ -964,7 +979,7 @@ void xrc_spin_yield(void);
 /* an inlined call (xrc_translator x_inline_site) is still a point where a waiting thread may get the GIL, as the call
  * was (a loop polling a flag through a getter that is now inlined would hold it for good otherwise); the registers
  * go to XCtx first, as at a call, only when it does */
-#define XRC_INL_PREEMPT() { if (xrc_gil_waiters && ++c->pre_n >= XRC_PREEMPT_N) { XRC_SPILL xrc_preempt_n(c); } }
+#define XRC_INL_PREEMPT() { if (XRC_UNL(xrc_gil_waiters && ++c->pre_n >= XRC_PREEMPT_N)) { XRC_SPILL xrc_preempt_n(c); } }
 #define XCALLXD(tgt, kin_, kout_, fn) { if ((kin_) >= 1) c->fa[0] = x_fa[0]; if ((kin_) >= 2) c->fa[1] = x_fa[1]; XCALLD(tgt, fn) if ((kout_) >= 1) x_fret = c->st0; }
 #define XCALLMD(tgt, fn) { XRC_XOUT_ XCALLD(tgt, fn) XRC_XIN_ }
 #define XCALLXMD(tgt, kin_, kout_, fn) { XRC_XOUT_ XCALLXD(tgt, kin_, kout_, fn) XRC_XIN_ }
@@ -985,9 +1000,37 @@ void xrc_spin_yield(void);
 #else
 #define XRC_ABI_NOTE_K(tgt, m_)
 #endif
-#define XCALLDK(tgt, fn, m_) { r_esp -= 4; MX32(r_esp) = x_ra_; XRC_SPILL XRC_PREEMPT() XRC_DS_PUSH(tgt) fn(c); XRC_DS_POP() \
-	if (c->eip != x_ra_) xrc_bad_return(c, (tgt)); XRC_ABI_NOTE_K(tgt, m_) XRC_FILL_K(m_) }
+#define XCALLDK(tgt, fn, m_) { r_esp -= 4; MX32(r_esp) = x_ra_; XRC_SPILL if (!((m_) & 0x200)) XRC_PREEMPT() XRC_DS_PUSH(tgt) fn(c); XRC_DS_POP() \
+	if (!((m_) & 0x100) && XRC_UNL(c->eip != x_ra_)) xrc_bad_return(c, (tgt)); XRC_ABI_NOTE_K(tgt, m_) XRC_FILL_K(m_) }
 #define XCALLXDK(tgt, kin_, kout_, fn, m_) { if ((kin_) >= 1) c->fa[0] = x_fa[0]; if ((kin_) >= 2) c->fa[1] = x_fa[1]; XCALLDK(tgt, fn, m_) if ((kout_) >= 1) x_fret = c->st0; }
+/* the direct-call entry (xrc_translator x_dabi_on): a stack-balanced function F is xd_F(c, esp) -> eax as well as xf_F(c),
+ * its wrapper. XCALLRDK calls xd_F: esp goes in the argument, eax comes back as the result, and nothing stores esp,
+ * eax or eip in XCtx (the caller knows esp after it: F is balanced; nobody checks eip). F's returns (XRC_RETURN_D)
+ * store the dirty registers but eax, and no esp / eip. The wrapper does those for the dispatcher and indirect calls. */
+#if defined(XRC_NO_ABI_KEEP) || defined(XRC_ABI_CHECK)
+#define XRC_FILL_KD(m_) { if (XRC_FM_ & 2) r_ecx = c->ecx; if (XRC_FM_ & 4) r_edx = c->edx; \
+	if (XRC_FM_ & 8) r_ebx = c->ebx; if (XRC_FM_ & 0x10) r_ebp = c->ebp; if (XRC_FM_ & 0x20) r_esi = c->esi; if (XRC_FM_ & 0x40) r_edi = c->edi; }
+#else
+#define XRC_FILL_KD(m_) { if (XRC_FM_ & 2) r_ecx = c->ecx; if (XRC_FM_ & 4) r_edx = c->edx; \
+	if (((m_) & 1) && (XRC_FM_ & 8)) r_ebx = c->ebx; if (((m_) & 2) && (XRC_FM_ & 0x20)) r_esi = c->esi; \
+	if (((m_) & 4) && (XRC_FM_ & 0x40)) r_edi = c->edi; if (((m_) & 8) && (XRC_FM_ & 0x10)) r_ebp = c->ebp; }
+#endif
+#define XRC_PREEMPT_D() { if (XRC_UNL(xrc_gil_waiters && ++c->pre_n >= XRC_PREEMPT_N)) { c->esp = (u32)r_esp; c->ecx = r_ecx; c->edx = r_edx; xrc_preempt_n(c); } }
+/* (ecx and edx go in arguments too, and are not stored: the callee, which has them dirty at its entry, stores them at
+ * its first sync point -- XCtx has them right after the call, whatever the callee did) */
+#define XRC_SPILL_REGS_R { if (XRC_SM_ & 1) c->eax = r_eax; \
+	if (XRC_SM_ & 8) c->ebx = r_ebx; if (XRC_SM_ & 0x10) c->ebp = r_ebp; if (XRC_SM_ & 0x20) c->esi = r_esi; if (XRC_SM_ & 0x40) c->edi = r_edi; }
+#define XCALLRDK(tgt, fn, m_) { r_esp -= 4; MX32(r_esp) = x_ra_; XRC_SPILL_REGS_R if (!((m_) & 0x200)) XRC_PREEMPT_D() XRC_DS_PUSH(tgt) \
+	r_eax = fn(c, r_esp, r_ecx, r_edx); XRC_DS_POP() XRC_ABI_NOTE_K(tgt, m_) XRC_FILL_KD(m_) }
+#define XCALLMRDK(tgt, fn, m_) { XRC_XOUT_ XCALLRDK(tgt, fn, m_) XRC_XIN_ }
+#define XCRDK_ XCALLRDK
+#define XRC_PROLOGUE_D u8 *const xm_ = xrc_mem;
+#define XRC_SPILL_REGS_NE { if (XRC_SM_ & 2) c->ecx = r_ecx; if (XRC_SM_ & 4) c->edx = r_edx; \
+	if (XRC_SM_ & 8) c->ebx = r_ebx; if (XRC_SM_ & 0x10) c->ebp = r_ebp; if (XRC_SM_ & 0x20) c->esi = r_esi; if (XRC_SM_ & 0x40) c->edi = r_edi; }
+#define XRC_RETURN_D(nbytes) do { r_esp += 4u + (u32)(nbytes); XRC_SPILL_REGS_NE return r_eax; } while (0)
+#define XRC_RETURNXD(n) do { XRC_XOUT_ XRC_RETURN_D(n); } while (0)
+#define XRC_DWRAP(a, n) { u8 *const xm_ = xrc_mem; XEA_T e_ = c->esp; u32 ra_ = MX32(e_); c->eax = xd_##a(c, e_, c->ecx, c->edx); \
+	c->esp = (u32)(e_ + 4u + (n)); c->eip = ra_; }
 #define XCALLMDK(tgt, fn, m_) { XRC_XOUT_ XCALLDK(tgt, fn, m_) XRC_XIN_ }
 #define XCALLXMDK(tgt, kin_, kout_, fn, m_) { XRC_XOUT_ XCALLXDK(tgt, kin_, kout_, fn, m_) XRC_XIN_ }
 #define XRC_FRET(v) (c->st0 = (double)(v))

@@ -280,7 +280,14 @@ Every variable is optional. The defaults are the settings the FINAL FANTASY XIII
 | `XRC_INLINE_HOTLIST=FILE` | `<data>/inline_hot.txt` | The hot list: hex addresses, one per line. `0` means no hot list. |
 | `XRC_INLINE_HOT=FILE` | none | Inlines only the functions listed in FILE, for testing. |
 | `XRC_DEVIRT=FILE` | `<data>/devirt_sites.txt` | The call-site profile for devirtualization. `0` turns devirtualization off. With no file, nothing is devirtualized. |
-| `XRC_DEVIRT_MIN=N` | 1000 | Devirtualizes a call site only if the profile saw at least N calls there. |
+| `XRC_DEVIRT_MIN=N` | 200 | Devirtualizes a call site only if the profile saw at least N calls there. |
+| `XRC_DEVIRT_PCT=P,Q` | 90,95 | Devirtualizes a call site when one target got at least P% of its calls, or two targets together Q%. |
+| `XRC_DIRECT_ABI=0` | on | Turns the direct-call entry off. When on, a stack-balanced function F is also emitted as `u32 xd_F(XCtx *c, esp, ecx, edx)`: a direct call passes esp, ecx and edx as arguments and gets eax back as the result, and neither side stores or reloads them (or eip) in `XCtx`. `xf_F` stays, as the wrapper the dispatcher and indirect calls use. FF13: about 1% less main-thread time in battle. |
+| `XRC_RET_VERIFY=1` | off | Keeps the return-address check after a direct call to a stack-balanced function, or its inlined body. By default it is left out: `ret` pops the very slot the call wrote, so the check could only catch a callee that overwrote its own return address, which is fatal anyway. FF13: code 14% smaller, battle 3% faster without it. |
+| `XRC_LEAF_NOPREEMPT=1` | off | Drops the GIL preemption check at direct calls; the back edge of every loop with a call in it has one instead. Measured no faster on FF13. |
+| `XRC_STACK_FRAMES=1` | off | The stack balance follows a function through its `frame_prolog ADDR EBP` helper (`xrc.cfg`). More functions come out balanced, but FF13 measured 1% slower in battle. |
+| `XRC_IMPN=FILE` / `XRC_IMPN=0` | `<data>/import_stack.txt` | The imports' stack effects, for the stack balance: `dll name N` lines, measured by a runtime that logs the `ret N` of each import handler. A call through such an import's IAT slot is then `esp += N`, and the call site checks esp after it. `0`: none. The FF13 port ships without the file (with it, 594 more functions are balanced, but battle measured 1% slower). |
+| `XRC_JUMP_CHUNK=1` | off | Follows a direct jump to a function that nothing calls as part of the jumping function (a chunk, such as a shared epilogue), instead of translating it as a tail call. A tail call assumes the stack holds nothing of the jumper's but the return address, which code that is only jumped to need not. Experimental. |
 
 ### Checking and debugging
 
@@ -293,7 +300,8 @@ Every variable is optional. The defaults are the settings the FINAL FANTASY XIII
 | `XRC_INLINE_WHY=ADDR` | Prints why the function at ADDR is or is not inlined. |
 | `XRC_ABI_WHY=ADDR[,ADDR...]` | Prints which callee-saved registers each of those functions keeps, and which instructions, calls or tail jumps decide that. |
 | `XRC_SYNC_RANGE=LO-HI` | Trims register syncs only in functions starting between LO and HI (hex), to bisect a wrong trim. |
-| `XRC_SLOT_DEBUG=1` | Prints the stack slots that stayed in memory, and why. |
+| `XRC_STACK_WHY=FILE` | Writes, for each function the stack balance found no `N` for, why: `addr cause-kind cause-addr [callee]` lines. |
+| `XRC_STACK_AUDIT=FILE` | Writes the stack audit's findings: places where code that the function map treats as a separate function uses its caller's frame. |
 | `XRC_X87_DEBUG=1` | Prints the x87 stack analysis's merge conflicts. |
 | `XRC_RX_SLOW=1` | Decodes with rexcode's general decoder instead of xrc's one-instruction fast path, to check the decoder. |
 
@@ -351,6 +359,7 @@ One entry per line, `#` for comments, addresses in hex:
 | Entry | Meaning |
 |---|---|
 | `frame_prolog ADDR` | A compiler frame-setup helper such as MSVC's `__SEH_prolog4` or `__EH_prolog3`. It pushes ebx, esi, edi and the caller's ebp on behalf of the function that calls it, which then writes them freely. xrc treats the call as that function's own prologue. |
+| `frame_prolog ADDR EBP` | The same, plus where it leaves ebp: esp at the call + EBP (decimal; 4 for `__SEH_prolog4`, 0 for `__EH_prolog3`). With `XRC_STACK_FRAMES=1` the stack balance follows the calling function through it. |
 | `frame_epilog ADDR` | Its counterpart, such as `__SEH_epilog4` or `__EH_epilog3`. It restores all four. |
 | `x87_helper ADDR TAKES GIVES` | A function whose x87 interface the stack analysis cannot derive, because its x87 paths are dynamic (the C runtime's `__CIsin` and similar). It takes TAKES values from the x87 stack and leaves GIVES there. |
 | `patched ADDR [LEN]` | Read-only data (LEN bytes, default 4) that the runtime changes at run time, such as a constant it patches for a feature. Its reads are not folded into the code as constants (`XRC_RDATA_FOLD`). |

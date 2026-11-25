@@ -151,12 +151,16 @@ x_sync_plan :: proc(xl: ^Xlat, ins: []Rx_Ins, spans: [][2]int, entry: u32) {
 	kept := make([]u8, n, ta)
 	mat := make([]int, n, ta)   // Call / Ret: where the macro starts, and ends
 	mend := make([]int, n, ta)
+	rk := make([]bool, n, ta)    // Call: an XCALLRDK (eax is its result: in the local, not in XCtx -- dirty after it)
 	idx := make(map[u32]i32, n, ta)
 	for &i, k in ins {idx[i.addr] = i32(k)}
 
 	for &i, k in ins {
 		t := buf[spans[k][0]:spans[k][1]]
-		ncall := x_sync_count(t, "XCALL") + x_sync_count(t, "XC_(") + x_sync_count(t, "XCD_(") + x_sync_count(t, "XCDK_(")
+		// (a back edge's XRC_INL_PREEMPT is no sync point: it stores every local only on its rare path, where a stale one is
+		// harmless -- a register whose local is stale is one this function does not read again -- and loads nothing)
+		if strings.contains(t, "XRC_INL_PREEMPT() goto") {t, _ = strings.replace_all(t, "XRC_INL_PREEMPT() ", "", context.temp_allocator)}
+		ncall := x_sync_count(t, "XCALL") + x_sync_count(t, "XC_(") + x_sync_count(t, "XCD_(") + x_sync_count(t, "XCDK_(") + x_sync_count(t, "XCRDK_(")
 		nret := x_sync_count(t, "XRC_RETURN")
 		if ncall + nret > 1 || strings.contains(t, "/* inlined") || strings.contains(t, "XRC_INL_") || strings.contains(t, "x_dv_") ||
 		   strings.contains(t, "_a != _b") || strings.contains(t, "XRC_SPILL") || strings.contains(t, "XRC_FILL") || strings.contains(t, "c->e") {
@@ -171,6 +175,7 @@ x_sync_plan :: proc(xl: ^Xlat, ins: []Rx_Ins, spans: [][2]int, entry: u32) {
 			e, ok := x_sync_macro_end(t, at)
 			if !ok {kind[k] = .Opaque; continue}
 			kind[k] = ncall == 1 ? .Call : .Ret
+			if ncall == 1 && strings.has_prefix(t[at:], "XCALLRDK(") {rk[k] = true}
 			mat[k], mend[k] = at, e
 			rd[k], wr[k] = x_sync_scan(t[:at])
 			// (the macro's own arguments are read before its stores: XCALL(r_esi) -- the target)
@@ -178,6 +183,8 @@ x_sync_plan :: proc(xl: ^Xlat, ins: []Rx_Ins, spans: [][2]int, entry: u32) {
 			rd[k] |= ra
 			wr[k] |= wa
 			rd2[k], wr2[k] = x_sync_scan(t[e:])
+			if nret == 1 && xl.dabi {rd[k] |= 1} // (an xd_ function returns its eax local)
+			if rk[k] {rd[k] |= 6} // (XCALLRDK passes the ecx and edx locals: they must be right there)
 			if ncall == 1 {kept[k] = x_sync_kept(t, at, e)}
 			continue
 		}
@@ -210,6 +217,9 @@ x_sync_plan :: proc(xl: ^Xlat, ins: []Rx_Ins, spans: [][2]int, entry: u32) {
 	// dirty: forward
 	din := make([]u8, n, ta)
 	dout := make([]u8, n, ta)
+	// (an xd_ function gets ecx and edx in arguments: their locals are not in XCtx at its entry -- dirty there)
+	XD_P :: u8(6)
+	if xl.dabi {din[ent] = XD_P}
 	for changed := true; changed; {
 		changed = false
 		for k in 0 ..< n {
@@ -217,7 +227,7 @@ x_sync_plan :: proc(xl: ^Xlat, ins: []Rx_Ins, spans: [][2]int, entry: u32) {
 			switch kind[k] {
 			case .Plain: o = din[k] | wr[k]
 			case .Opaque: o = X_SYNC_ALL
-			case .Call: o = wr2[k]
+			case .Call: o = wr2[k] | (rk[k] ? 1 : 0)
 			case .Ret: o = X_SYNC_ALL
 			}
 			if o != dout[k] {dout[k] = o; changed = true}
@@ -227,7 +237,31 @@ x_sync_plan :: proc(xl: ^Xlat, ins: []Rx_Ins, spans: [][2]int, entry: u32) {
 			if nv != din[e[1]] {din[e[1]] = nv; changed = true}
 		}
 	}
-	_ = ent // (the entry's dirty set is empty: the locals are loaded from XCtx -- every din starts so)
+	// (otherwise the entry's dirty set is empty: the locals are loaded from XCtx -- every din starts so)
+	// an xd_ function's ecx / edx that its own code never writes (on any way to a return) are not stored there: XCtx
+	// already has them wherever its caller reads them back (XCALLRDK stores them first then, and the wrapper passes
+	// XCtx's) -- may-written, forward
+	mw := make([]u8, n, ta)
+	mwo := make([]u8, n, ta)
+	if xl.dabi {
+		for changed := true; changed; {
+			changed = false
+			for k in 0 ..< n {
+				o: u8
+				switch kind[k] {
+				case .Plain: o = mw[k] | wr[k]
+				case .Opaque: o = X_SYNC_ALL
+				case .Call: o = mw[k] | wr[k] | wr2[k]
+				case .Ret: o = mw[k] | wr[k]
+				}
+				if o != mwo[k] {mwo[k] = o; changed = true}
+			}
+			for e in succ {
+				nv := mw[e[1]] | mwo[e[0]]
+				if nv != mw[e[1]] {mw[e[1]] = nv; changed = true}
+			}
+		}
+	}
 
 	// live: backward
 	lin := make([]u8, n, ta)
@@ -251,6 +285,9 @@ x_sync_plan :: proc(xl: ^Xlat, ins: []Rx_Ins, spans: [][2]int, entry: u32) {
 				v = rd[k] | sm[k] | (fm[k] & kept[k])
 			case .Ret:
 				sm[k] = din[k] | wr[k]
+				// (an xd_ function stores ecx / edx at its returns like any dirty register: XCtx has them after XCALLRDK, which
+				// does not store them -- the game relies on registers a callee keeps, also caller-saved ones: whole-program
+				// code generation; leaving a passed register unstored crashed 11-23)
 				v = rd[k] | sm[k]
 			}
 			if v != lin[k] {lin[k] = v; changed = true}

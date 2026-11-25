@@ -29,6 +29,7 @@ GPR := [8]string{"eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"}
 
 Xlat :: struct {
 	b:      strings.Builder, // the function body
+	dabi:   bool, // emitted as xd_ (x_dabi_ok): its returns give eax as the result (x_sync_plan: eax live at each)
 	addr:   u32,
 	size:   u32,
 	tables: map[u32][dynamic]u32, // switch jumps: jmp address -> targets
@@ -107,6 +108,7 @@ X_Abi_Fn :: struct {
 	own:   u8,             // the registers its own instructions keep
 	calls: [dynamic][2]u32, // direct calls: target, the registers pushed (saved) before it
 	tails: [dynamic]u32,    // direct tail jumps
+	leaf:  bool,           // no call and no jump out at all (x_leaf)
 }
 x_abi_idx :: proc(r: x86.Register) -> int {
 	cl := x86.reg_class(r)
@@ -134,12 +136,14 @@ x_abi_scan :: proc(a: u32, size: u32) -> (f: X_Abi_Fn) {
 			reloads[{i32(k), m.disp}] = true
 		}
 	}
+	any_call := false
 	leaves := false // (a ret, or a jump out: a tail call, a computed jump; none: it never returns -- __report_gsfailure,
 	                // exit paths -- and what it does to the registers reaches no caller)
 	for &i in ins {
 		mn := i.inst.mnemonic
 		if mn == .RET {leaves = true}
-		if mn == .JMP && i.inst.operand_count >= 1 && i.inst.ops[0].kind != .RELATIVE {leaves = true}
+		if mn == .JMP && i.inst.operand_count >= 1 && i.inst.ops[0].kind != .RELATIVE {leaves = true; any_call = true}
+		if mn == .CALL {any_call = true}
 		w: u8
 		if mn == .PUSH && i.inst.operand_count >= 1 && i.inst.ops[0].kind == .REGISTER {
 			if k := x_abi_idx(i.inst.ops[0].reg); k >= 0 && written & (1 << u8(k)) == 0 {pushed |= 1 << u8(k)}
@@ -197,9 +201,13 @@ x_abi_scan :: proc(a: u32, size: u32) -> (f: X_Abi_Fn) {
 		f.own &~= w &~ pushed
 		written |= w
 	}
+	f.leaf = !any_call && len(f.tails) == 0 && leaves
 	if !leaves {f.own = 0xf; clear(&f.calls)}
 	return
 }
+// the leaf functions (x_abi_scan: they call nothing, jump nowhere else): a direct call to one needs no preemption
+// check (x_call_nopre) -- it runs a bounded time, unless it loops without calls, which it would anyway
+x_leaf: map[u32]bool
 x_abi_addrs: []u32
 x_abi_res: []X_Abi_Fn
 x_abi_plan :: proc(addrs: []u32, funcs: map[u32]u32) {
@@ -213,6 +221,8 @@ x_abi_plan :: proc(addrs: []u32, funcs: map[u32]u32) {
 	for a, i in addrs {fns[a] = x_abi_res[i]}
 	delete(x_abi_res)
 	for a, f in fns {x_abi_keep[a] = f.own}
+	x_leaf = make(map[u32]bool)
+	for a, f in fns {if f.leaf {x_leaf[a] = true}}
 	// the frame helpers (xrc.cfg), whatever the scan says: a prolog changes its caller's ebp (keeps ebx esi edi: it
 	// pushes them unchanged), an epilog restores all four (each changes)
 	for h in cfg_prologs {if h in x_abi_keep {x_abi_keep[h] = 7}}
@@ -1226,7 +1236,7 @@ x_inline_off := false // (planning: the candidates translated without inlining i
 // guarded fast path: if the target is it, its translation inlined (x_inline) or called directly (XCALLDK: the
 // callee-saved registers kept); else the cache's call as before. Exact either way -- the guard compares the target the
 // original computed. The profile: data\devirt_sites.txt beside xrc.exe, or XRC_DEVIRT=FILE; XRC_DEVIRT=0: none.
-// A site qualifies with at least XRC_DEVIRT_MIN calls (default 1000) of which 90% go to one target.
+// A site qualifies with at least XRC_DEVIRT_MIN calls (default 200) of which 90% go to one target.
 // A site with two targets (a base class and one derived class, say) that together take 95% of its calls, each at
 // least 5%, gets both (x_devirt2: the second).
 x_devirt: map[u32]u32 // return address (the site) -> its target
@@ -1241,7 +1251,7 @@ x_devirt_load :: proc() {
 		f = table_path("devirt_sites.txt") // (the game's data folder; none there: no devirtualization)
 		if !os.exists(f) {return}
 	}
-	minn := 1000
+	minn := 200 // (11-24: 200 beat 1000 by -0.6% battle, -1.2% field; 50 no better)
 	if v := os.get_env("XRC_DEVIRT_MIN", context.temp_allocator); v != "" {minn, _ = strconv.parse_int(v)}
 	txt, ok := read_text(f)
 	if !ok {fmt.printf("xrc: devirtualization profile %s not readable\n", f); return}
@@ -1269,11 +1279,16 @@ x_devirt_load :: proc() {
 		sites[k[0]] = st
 	}
 	n2 := 0
+	// XRC_DEVIRT_PCT=P,Q: one target with P% of the calls, two with Q% (default 90,95)
+	p1, p2 := 90, 95
+	if v := os.get_env("XRC_DEVIRT_PCT", context.temp_allocator); v != "" {
+		if i := strings.index_byte(v, ','); i > 0 {p1, _ = strconv.parse_int(v[:i]); p2, _ = strconv.parse_int(v[i + 1:])} else {p1, _ = strconv.parse_int(v)}
+	}
 	for ra, st in sites {
 		if st.total < minn || !(st.t in x_direct_ok) {continue}
-		if st.best * 10 >= st.total * 9 {
+		if st.best * 100 >= st.total * p1 {
 			x_devirt[ra] = st.t
-		} else if (st.best + st.best2) * 20 >= st.total * 19 && st.best2 * 20 >= st.total && st.t2 in x_direct_ok {
+		} else if (st.best + st.best2) * 100 >= st.total * p2 && st.best2 * 20 >= st.total && st.t2 in x_direct_ok {
 			x_devirt[ra] = st.t
 			x_devirt2[ra] = st.t2
 			n2 += 1
@@ -1428,7 +1443,8 @@ x_inline_one :: proc(idx: int) {
 					rest := t
 					for line in strings.split_lines_iterator(&rest) {
 						if strings.contains(line, "XCALL") {
-							l2, _ := strings.replace_all(line, "XCALLDK(", "XCDK_(")
+							l1, _ := strings.replace_all(line, "XCALLRDK(", "XCRDK_(")
+							l2, _ := strings.replace_all(l1, "XCALLDK(", "XCDK_(")
 							l2, _ = strings.replace_all(l2, "XCALLD(", "XCD_(")
 							l2, _ = strings.replace_all(l2, "XCALL(", "XC_(")
 							fmt.sbprintf(&bl, "    {{%s\n%s\n   %s }}\n", strings.to_string(sv), l2, strings.to_string(ld))
@@ -1498,10 +1514,10 @@ x_inline_site :: proc(xl: ^Xlat, ins: ^Rx_Ins, target: u32, il: X_Inline, alt :=
 				n := t[k + len("XRC_RETURN("):k + e]
 				strings.write_string(&b, t[from:k])
 				if xst != "" {
-					fmt.sbprintf(&b, "%sXRC_INL_RET(%s, 0x%xu, 0x%xu, LX_%s) }}", xst, n, ra, target, site)
+					fmt.sbprintf(&b, "%sXRC_INL_RET(%s, 0x%xu, 0x%xu, LX_%s) }}", xst, n, x_ret_nocheck && x_balanced(target) ? 0 : ra, target, site)
 					if k + e + 1 < len(t) && t[k + e + 1] == ';' {e += 1} // (the block needs none)
 				} else {
-					fmt.sbprintf(&b, "XRC_INL_RET(%s, 0x%xu, 0x%xu, LX_%s)", n, ra, target, site)
+					fmt.sbprintf(&b, "XRC_INL_RET(%s, 0x%xu, 0x%xu, LX_%s)", n, x_ret_nocheck && x_balanced(target) ? 0 : ra, target, site)
 				}
 				from = k + e + 1
 				k += e
@@ -1579,6 +1595,14 @@ x_call :: proc(xl: ^Xlat, ins: ^Rx_Ins, ops: []x86.Operand, ea: string, have_ea:
 			return
 		}
 	}
+	if nn, is_imp := x_imp_site(ops[0]); is_imp {
+		// (an import with a known stack effect, x_imp_n: esp checked against it -- the stack balance assumed it -- and set
+		// from it; no stale-slot write: under Windows the slot holds whatever the system's code left there)
+		pf(xl, "    {{ XEA_T x_s_ = r_esp;")
+		x_call_fp(xl, ins, t, 0, 0)
+		pf(xl, "    if (XRC_UNL((u32)r_esp != (u32)(x_s_ + 0x%xu))) xrc_imp_bad(c, 0x%xu, 0x%xu); r_esp = x_s_ + 0x%xu; }}", u32(nn), u32(ops[0].mem.disp), ins.addr, u32(nn))
+		return
+	}
 	// the call's push of the return address leaves the host return address in the dead slot below the guest esp;
 	// put the original's there (code reads such stale slots as uninitialized locals of the next call) -- unless the
 	// callee moved the stack down (__SEH_prolog4, __chkstk): the slot is then inside the new frame, and live
@@ -1597,6 +1621,9 @@ x_abi_reload :: proc(a: u32) -> int {
 	return ok ? int(~k & 0xf) : 0xf
 }
 
+// XCALLDK's mask: the reloads (x_abi_reload), and 0x100: no return-address check (x_ret_nocheck)
+x_call_mask :: proc(a: u32) -> int {return x_abi_reload(a) | (x_ret_nocheck && x_balanced(a) ? 0x100 : 0) | (x_call_nopre && a in x_leaf ? 0x200 : 0)}
+
 x_call_fp :: proc(xl: ^Xlat, ins: ^Rx_Ins, t: string, key: u32 = 0, direct: u32 = 0, ra: string = "") {
 	e := xl.callfp[key != 0 ? key : ins.addr]
 	pf(xl, "    x_ra_ = %s;", ra != "" ? ra : x_hexu(u32(ins.addr + ins.len)))
@@ -1606,7 +1633,8 @@ x_call_fp :: proc(xl: ^Xlat, ins: ^Rx_Ins, t: string, key: u32 = 0, direct: u32 
 		append(&xl.direct, direct)
 	}
 	if e.transparent || (e.kin == 0 && e.kout == 0) {
-		if d {pf(xl, "    XCALLDK(%s, %s_%08x, %d);", t, direct in x_fast ? "xo" : "xf", direct, x_abi_reload(direct))} else {pf(xl, "    XCALL(%s);", t)}
+		if d && x_dabi_ok(direct) {pf(xl, "    XCALLRDK(%s, xd_%08x, %d);", t, direct, x_call_mask(direct)); return}
+		if d {pf(xl, "    XCALLDK(%s, %s_%08x, %d);", t, direct in x_fast ? "xo" : "xf", direct, x_call_mask(direct))} else {pf(xl, "    XCALL(%s);", t)}
 		return
 	}
 	xl.uses_fp = true
@@ -1615,7 +1643,7 @@ x_call_fp :: proc(xl: ^Xlat, ins: ^Rx_Ins, t: string, key: u32 = 0, direct: u32 
 	if key == 0 {base = max(xl.fdepth[ins.addr] - e.kin, 0)}
 	if e.kin >= 1 {pf(xl, "    x_fa[0] = f%d;", base + e.kin - 1)}
 	if e.kin >= 2 {pf(xl, "    x_fa[1] = f%d;", base + e.kin - 2)}
-	if d {pf(xl, "    XCALLXDK(%s, %d, %d, %s_%08x, %d);", t, e.kin, e.kout, direct in x_fast ? "xo" : "xf", direct, x_abi_reload(direct))} else {pf(xl, "    XCALLX(%s, %d, %d);", t, e.kin, e.kout)}
+	if d {pf(xl, "    XCALLXDK(%s, %d, %d, %s_%08x, %d);", t, e.kin, e.kout, direct in x_fast ? "xo" : "xf", direct, x_call_mask(direct))} else {pf(xl, "    XCALLX(%s, %d, %d);", t, e.kin, e.kout)}
 	if e.kout >= 1 {pf(xl, "    f%d = x_fret;", base)}
 }
 
@@ -1625,8 +1653,7 @@ x_jmp :: proc(xl: ^Xlat, ins: ^Rx_Ins, ops: []x86.Operand, ea: string, have_ea: 
 		t := rx_rel_target(ins, 0)
 		if t in xl.labels {
 			if ins.addr in xl.spin_back {pf(xl, "    XRC_SPIN_YIELD()")}
-			if ins.addr in xl.inl_back {pf(xl, "    XRC_INL_PREEMPT()")}
-			pf(xl, "    goto L_%08x;", t)
+			if ins.addr in xl.inl_back {pf(xl, "    XRC_INL_PREEMPT() goto L_%08x;", t)} else {pf(xl, "    goto L_%08x;", t)}
 		} else {
 			// jmp outside the function body = a tail call to another function; its result is ours
 			x_tail(xl, ins, x_hexu(u32(t)), 0, t)
@@ -1760,6 +1787,7 @@ x_spin_plan :: proc(xl: ^Xlat, ins: []Rx_Ins) {
 			if i.inst.ops[0].kind == .RELATIVE {
 				t := rx_rel_target(&i, 0)
 				inl = t in x_inline && t != xl.addr
+				if !inl && x_call_nopre && t in x_leaf && t in x_direct_ok {inl = true} // (a leaf call without its preemption check)
 			} else if dt, is_dv := x_devirt[i.addr + i.len]; is_dv {inl = dt in x_inline}
 		}
 		ninl[k + 1] = ninl[k] + (inl ? 1 : 0)
@@ -1783,6 +1811,7 @@ x_spin_plan :: proc(xl: ^Xlat, ins: []Rx_Ins) {
 
 x_translate :: proc(a: u32, size: u32, exclude: map[i32]bool = nil, nofl := false) -> Xlat {
 	xl := Xlat{addr = a, size = size, ok = true, labels = make(map[u32]bool)}
+	xl.dabi = x_dabi_ok(a)
 	xl.tables = make(map[u32][dynamic]u32, context.temp_allocator)
 	xl.btables = make(map[u32]bool, context.temp_allocator)
 	strings.builder_init(&xl.b)
@@ -1987,6 +2016,7 @@ cmd_xrc :: proc(args: []string) -> int {
 	x87_precompute()
 	x_sync_init()
 	x_flat_on = !ir_mode && os.get_env("XRC_FLAT_EA", context.temp_allocator) != "0"
+	x_dabi_on = !ir_mode && os.get_env("XRC_DIRECT_ABI", context.temp_allocator) != "0"
 	x_rdata_on = !ir_mode && os.get_env("XRC_RDATA_FOLD", context.temp_allocator) != "0"
 	_, _, _ = x_fl_disabled(), x_fl_verify(), x_fl_debug()
 	lap(x_timing, &t_last, "x87 effects")
@@ -2130,7 +2160,9 @@ cmd_xrc :: proc(args: []string) -> int {
 		okset := make(map[u32]bool)
 		for a in ok_list {okset[a] = true}
 		for a in x_direct_used {
-			if !(a in okset) {fmt.sbprintf(&tb, "void XRC_CC xf_%08x(XCtx *c) {{ xrc_dispatch(c, 0x%08xu); }}\n", a, a)}
+			if !(a in okset) {fmt.sbprintf(&tb, "void XRC_CC xf_%08x(XCtx *c) {{ xrc_dispatch(c, 0x%08xu); }}\n", a, a)
+				if x_dabi_ok(a) {fmt.sbprintf(&tb, "u32 XRC_CC xd_%08x(XCtx *c, XEA_T e, u32 x_c, u32 x_d) {{ c->esp = (u32)e; c->ecx = x_c; c->edx = x_d; xrc_dispatch(c, 0x%08xu); return c->eax; }}\n", a, a)}
+			}
 		}
 		fmt.sbprintf(&tb, "\nconst XrcFn xrc_fns[] = {{\n")
 		for a in ok_list {fmt.sbprintf(&tb, "\t{{0x%08xu, xf_%08x}},\n", a, a)}
@@ -2295,8 +2327,12 @@ x_discover_entries :: proc() -> [dynamic]u32 {
 // the real ones (the other functions have no X).
 x_append_function :: proc(sb: ^strings.Builder, xl: ^Xlat) {
 	fmt.sbprintf(sb, "\n/* ---- %08x ---- */\n", xl.addr)
-	for d in xl.direct {if d != xl.addr || d in x_fast {fmt.sbprintf(sb, "void XRC_CC %s_%08x(XCtx *c);\n", d in x_fast ? "xo" : "xf", d)}}
+	for d in xl.direct {
+		if d != xl.addr && x_dabi_ok(d) {fmt.sbprintf(sb, "u32 XRC_CC xd_%08x(XCtx *c, XEA_T e, u32 x_c, u32 x_d); void XRC_CC xf_%08x(XCtx *c);\n", d, d); continue}
+		if d != xl.addr || d in x_fast {fmt.sbprintf(sb, "void XRC_CC %s_%08x(XCtx *c);\n", d in x_fast ? "xo" : "xf", d)}
+	}
 	fmt.sbprintf(sb, "void XRC_CC xf_%08x(XCtx *c);\n", xl.addr)
+	if xl.dabi {fmt.sbprintf(sb, "u32 XRC_CC xd_%08x(XCtx *c, XEA_T e, u32 x_c, u32 x_d);\n", xl.addr)}
 	fmt.sbprintf(sb, "%s(%08x)\n", xl.fret ? "XRC_THUNKF" : "XRC_THUNK", xl.addr)
 	// SSE: the xmm registers it uses are locals (XRC_XLOCAL), from c->x at the entry and back to it around calls and
 	// at returns (XRC_XIN_ / XRC_XOUT_: only those it names)
@@ -2314,9 +2350,15 @@ x_append_function :: proc(sb: ^strings.Builder, xl: ^Xlat) {
 		strings.write_string(sb, " }\n")
 	}
 	if xl.uses_ix {strings.write_string(sb, xl.uses_x ? "#define XRC_IXOUT_ XRC_XOUT_\n#define XRC_IXIN_ XRC_XIN_\n" : "#define XRC_IXOUT_\n#define XRC_IXIN_\n")}
-	fmt.sbprintf(sb, "void XRC_CC xf_%08x(XCtx *c) {{\n", xl.addr)
-	fmt.sbprintf(sb, "    u32 r_eax = c->eax, r_ecx = c->ecx, r_edx = c->edx, r_ebx = c->ebx;\n")
-	fmt.sbprintf(sb, "    XEA_T r_esp = c->esp, r_ebp = c->ebp; u32 r_esi = c->esi, r_edi = c->edi;\n")
+	if xl.dabi {
+		// (x_dabi_on: the body as xd_, the wrapper the dispatcher and indirect calls run)
+		fmt.sbprintf(sb, "void XRC_CC xf_%08x(XCtx *c) XRC_DWRAP(%08x, 0x%xu)\n", xl.addr, xl.addr, u32(x_stk_n[xl.addr]))
+		fmt.sbprintf(sb, "u32 XRC_CC xd_%08x(XCtx *c, XEA_T e, u32 x_c, u32 x_d) {{\n", xl.addr)
+	} else {
+		fmt.sbprintf(sb, "void XRC_CC xf_%08x(XCtx *c) {{\n", xl.addr)
+	}
+	fmt.sbprintf(sb, xl.dabi ? "    u32 r_eax = c->eax, r_ecx = x_c, r_edx = x_d, r_ebx = c->ebx;\n" : "    u32 r_eax = c->eax, r_ecx = c->ecx, r_edx = c->edx, r_ebx = c->ebx;\n")
+	fmt.sbprintf(sb, xl.dabi ? "    XEA_T r_esp = e, r_ebp = c->ebp; u32 r_esi = c->esi, r_edi = c->edi;\n" : "    XEA_T r_esp = c->esp, r_ebp = c->ebp; u32 r_esi = c->esi, r_edi = c->edi;\n")
 	if xl.uses_f {
 		fmt.sbprintf(sb, "    u32 cc_a = 0, cc_b = 0, cc_r = 0, cf = 0; u8 cc_op = 0, cc_sz = 4;\n")
 		if xl.fl_on && x_fl_verify() {fmt.sbprintf(sb, "    u32 p_a = 0, p_b = 0, p_r = 0, p_cf = 0; u8 p_op = 0, p_sz = 4;\n")}
@@ -2333,15 +2375,16 @@ x_append_function :: proc(sb: ^strings.Builder, xl: ^Xlat) {
 	}
 	fmt.sbprintf(sb, "    XRC_LOCALS\n")
 	if xl.uses_fp {fmt.sbprintf(sb, "    XRC_FCW_INIT\n")}
-	fmt.sbprintf(sb, "    XRC_PROLOGUE\n")
+	fmt.sbprintf(sb, xl.dabi ? "    XRC_PROLOGUE_D\n" : "    XRC_PROLOGUE\n")
 	fmt.sbprintf(sb, "    XRC_FN_ENTER(0x%xu)\n", xl.addr)
 	if xl.uses_x {fmt.sbprintf(sb, "    XRC_XENTRY\n")}
 	body := strings.to_string(xl.b)
+	if xl.dabi {body, _ = strings.replace_all(body, "XRC_RETURN(", xl.uses_x ? "XRC_RETURNXD(" : "XRC_RETURN_D(", context.temp_allocator)} // (eax as the result)
 	if xl.uses_x {
 		// the call / return macros that also move the xmm registers: one pass (the names cannot overlap, and no
 		// replacement makes another match)
 		REN :: [?][2]string{{"XRC_RETURN(", "XRC_RETURNX("}, {"XCALLX(", "XCALLXM("}, {"XCALL(", "XCALLM("}, {"XCALLXD(", "XCALLXMD("},
-			{"XCALLD(", "XCALLMD("}, {"XCALLXDK(", "XCALLXMDK("}, {"XCALLDK(", "XCALLMDK("}}
+			{"XCALLD(", "XCALLMD("}, {"XCALLXDK(", "XCALLXMDK("}, {"XCALLDK(", "XCALLMDK("}, {"XCALLRDK(", "XCALLMRDK("}}
 		from := 0
 		for q := 0; q < len(body); q += 1 {
 			if body[q] != 'X' {continue}

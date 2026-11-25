@@ -6,6 +6,9 @@ package xrc
 //   frame_prolog ADDR             a compiler frame-setup helper (MSVC's __SEH_prolog4, __EH_prolog3, ...): it pushes
 //                                 ebx esi edi and the caller's ebp for the function that calls it, which then writes
 //                                 them freely -- taken as that function's own prologue
+//   frame_prolog ADDR EBP         ... and where it leaves ebp: esp at the call + EBP (decimal; __SEH_prolog4 4,
+//                                 __EH_prolog3 0) -- the stack balance then follows the function through it (esp
+//                                 unknown after it, ebp known; an epilog: esp = ebp + 4, as leave)
 //   frame_epilog ADDR             its counterpart (__SEH_epilog4, __EH_epilog3): restores all four
 //   x87_helper ADDR TAKES GIVES   a function with an x87 interface the flow analysis cannot derive (its x87 paths are
 //                                 dynamic, e.g. the CRT's __CIsin): how many x87 values it takes from the stack and how
@@ -25,6 +28,7 @@ import "core:strings"
 
 cfg_prologs: map[u32]bool
 cfg_epilogs: map[u32]bool
+cfg_prolog_ebp: map[u32]i32 // (frame_prolog ADDR EBP: ebp after it, from esp at the call)
 cfg_x87: [dynamic][3]u32 // address, values taken, values returned
 cfg_patches: [dynamic]Cfg_Patch
 
@@ -41,9 +45,14 @@ config_load :: proc(path: string) -> bool {
 		bad := false
 		switch f[0] {
 		case "frame_prolog", "frame_epilog":
-			a, oka := hex_u32(len(f) == 2 ? f[1] : "")
+			a, oka := hex_u32(len(f) == 2 || (len(f) == 3 && f[0] == "frame_prolog") ? f[1] : "")
 			if !oka {bad = true; break}
 			if f[0] == "frame_prolog" {cfg_prologs[a] = true} else {cfg_epilogs[a] = true}
+			if len(f) == 3 {
+				v, okv := strconv.parse_int(f[2], 10)
+				if !okv {bad = true; break}
+				cfg_prolog_ebp[a] = i32(v)
+			}
 		case "x87_helper":
 			if len(f) != 4 {bad = true; break}
 			a, oka := hex_u32(f[1])

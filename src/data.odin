@@ -79,6 +79,7 @@ Exe :: struct {
 	names:    map[u32]string,
 	what:     string,       // "ELF i386 executable" ... (for the summary)
 	bias:     u32,          // a PIE / shared object: where it was placed (its link addresses + bias)
+	imp_slot: map[u32]string, // PE: each IAT slot's import, "dll!name" (dll lowercase; "dll!#N" by ordinal) -- x_imp_n
 }
 
 exe: Exe
@@ -156,11 +157,17 @@ load_pe :: proc(d: []u8) -> bool {
 			for desc := base + irva; ; desc += 20 {
 				b := exe_read(desc, 20)
 				if len(b) < 20 || u32le(b, 12) == 0 {break}
+				dll := strings.to_lower(cstr(exe_read(base + u32le(b, 12), 256), 0))
+				look := u32le(b, 0) != 0 ? base + u32le(b, 0) : base + u32le(b, 16) // (the lookup table: the file's IAT holds the same before binding)
 				iat := base + u32le(b, 16)
 				n := u32(0)
 				for {
 					t := exe_read(iat + 4 * n, 4)
 					if len(t) < 4 || u32le(t, 0) == 0 {break}
+					if l := exe_read(look + 4 * n, 4); len(l) == 4 {
+						v := u32le(l, 0)
+						exe.imp_slot[iat + 4 * n] = v & 0x80000000 != 0 ? fmt.aprintf("%s!#%d", dll, v & 0xffff) : fmt.aprintf("%s!%s", dll, cstr(exe_read(base + v + 2, 256), 0))
+					}
 					n += 1
 				}
 				append(&exe.no_fold, [2]u32{iat, iat + 4 * n + 4})
