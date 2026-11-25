@@ -1,0 +1,23 @@
+# the function map's sizes that end before the function does (Ghidra stopped at a switch: its cases and tables lie
+# after the size it gave): up to the next function
+00c20f40 544
+00d33b40 864
+009795d0 128
+00d15610 912
+# parents of the split entries taken out of the map (Ghidra cut them at a branch target): to the piece's end
+0048a890 203
+004944e0 443
+004e20c0 7277
+004f1fc0 9431
+0057b000 247
+007891f0 149
+0096d550 153
+0096d910 203
+009abd30 348
+009de140 241
+00a71010 657
+00a96440 202
+00b0aec0 265
+00746960 31
+00746360 1536
+008effc0 768

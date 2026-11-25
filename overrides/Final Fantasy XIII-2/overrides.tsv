@@ -1,0 +1,136 @@
+# Guest functions that are not translated but covered (read by xrc --override="Final Fantasy XIII-2"; the ovr_*.c here
+# are copied with the pages to <out>/overrides/ and compiled with the runtime). Kinds: manual, wrapped, fast, unreachable.
+# address	kind	name / why
+00ceb6b0	manual	acos
+00ceb6f0	manual	__CIacos
+00ceb73f	manual	acos (x87 entry)
+00ceca30	manual	fmod
+00ceca3a	manual	__CIfmod
+00cea080	manual	_ftol2_sse
+00cea0b6	manual	_ftol2
+00cee420	manual	asin
+00cee460	manual	__CIasin
+00cee4af	manual	asin (x87 entry)
+00cef8c0	manual	pow
+00cef900	manual	__CIpow
+00cef954	manual	pow (x87 entry)
+00cf29d0	manual	exp
+00cf2a0c	manual	__CIexp
+00cf2a47	manual	exp (x87 entry)
+00cf2a60	manual	log
+00cf2aa0	manual	__CIlog
+00cf2aef	manual	log (x87 entry)
+00cf2bb0	manual	cos
+00cf2bf0	manual	__CIcos
+00cf2c3f	manual	cos (x87 entry)
+00cf2ce0	manual	sin
+00cf2d20	manual	__CIsin
+00cf2d6f	manual	sin (x87 entry)
+00cfc820	manual	tan
+00cfc860	manual	__CItan
+00cfc8af	manual	tan (x87 entry)
+00d038c0	manual	__set_statfp_raise
+00d4f000	manual	MSS CPU features
+00cef95d	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00cefb22	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00cfc000	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00cfc067	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00cfc1e7	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00cfc230	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00cfc25c	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00cfc275	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00cfc2db	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00cfca30	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00cfca6e	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00cfcaf3	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00cfcafa	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00cfcc74	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00cfd4b6	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00cfd6bc	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00d01070	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00d03990	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00d05400	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00d05ae0	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00d09b60	unreachable	CRT math internal (x87 dispatch / error handling), reached only from the entry points in ovr_alba.c
+00ceca44	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfc104	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfc112	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfc13d	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfc167	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfc1a6	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfcdd4	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfcdda	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfcddf	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfcde5	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfcdea	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfcdf0	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfcdf6	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfcdfc	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfce02	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfce23	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfce3e	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfce5a	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfce6a	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfce7e	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfce8e	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfceb3	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfced2	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfcef2	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfcf06	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfcf1e	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfcf32	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfcf57	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfcf76	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfcf96	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfcfaa	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfcfc2	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfcfd6	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfcffb	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd01a	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd03a	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd04e	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd066	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd07a	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd09f	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd0be	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd0de	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd0f2	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd10a	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd11e	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd143	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd162	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd182	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd196	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd1ae	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd1c2	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd1e7	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd206	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd226	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd23a	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfd252	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00d04501	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00d04641	unreachable	CRT math internal (x87 dispatch tables / error handling), reached only from the entry points in ovr_alba.c
+00cfc10d	unreachable	CRT math internal (x87 dispatch tables), reached only from the entry points in ovr_alba.c
+00cfc13f	unreachable	CRT math internal (x87 dispatch tables), reached only from the entry points in ovr_alba.c
+00cfc1d0	unreachable	CRT math internal, reached only from the entry points in ovr_alba.c
+00d05afe	unreachable	CRT math internal, reached only from the entry points in ovr_alba.c
+00504461	unreachable	data in .text (a string table) that discovery took for code: never called
+00639773	unreachable	data in .text that discovery took for code: never called
+0052d240	fast	Matrix44::Transform (ovr_simd.c)
+00ced4f0	wrapped	qsort (ovr_alba.c: XRC_QSORT_STATS)
+0048cea0	fast	Matrix44::TransformPoint (ovr_simd.c)
+00a45f70	fast	Aabb::Extended (ovr_simd.c)
+00525f90	fast	Quat::Mul (ovr_simd.c)
+00c027f0	wrapped	frame pacer tick (ovr_alba.c: XRC_FRAME_LIMIT, release when due, not snapped)
+00c02660	wrapped	frame step (ovr_alba.c: XRC_FRAME_LIMIT, ticks with the remainder carried)
+00c027b0	wrapped	frame wait (ovr_alba.c: XRC_FRAME_LIMIT, a late frame released at once)
+00c30500	fast	D3D proxy SetVertexShaderConstantF (ovr_simd.c)
+00c301f0	fast	D3D proxy SetSamplerState (ovr_simd.c)
+00c305c0	fast	D3D proxy SetStreamSourceFreq (ovr_simd.c)
+00c30670	fast	D3D proxy SetPixelShaderConstantF (ovr_simd.c)
+00c30580	fast	D3D proxy SetVertexShaderConstantB (ovr_simd.c)
+00c30450	fast	D3D proxy SetVertexDeclaration (ovr_simd.c)
+00c30470	fast	D3D proxy SetFVF (ovr_simd.c)
+00c300b0	fast	D3D proxy SetRenderState (ovr_simd.c)
+00c310e0	fast	D3D proxy SetStreamSource (ovr_simd.c)
+00c1d710	fast	Render::BindStreams: the 16 vertex streams of a draw (ovr_simd.c)
